@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from .socket_wrapper import Socket, UDP
+from .socket_wrapper import Socket
 import struct
 import time
 import sys

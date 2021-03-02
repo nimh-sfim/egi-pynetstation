@@ -6,3 +6,6 @@
 """
 
 __version__ = '0.1.0'
+
+from .exceptions import *
+from .eci import Command
