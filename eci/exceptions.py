@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+class SocketException(Exception):
+    pass
+
+class SocketIncompleteTransmission(Exception):
+    """Exception for incomplete transmission on write to address"""
+    def __init__(self, transmitted: int, expected: int):
+        self.message = (
+            '%d bytes of %d were transmitted' % (transmitted, expected)
+        )
+
 class ECIException(Exception):
     pass
 

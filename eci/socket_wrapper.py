@@ -29,6 +29,10 @@ class Socket():
     def connect(self) -> None:
         """
         Connect to the TCP/IP socket
+
+        Raises
+        ------
+        ConnectionRefusedError if the address is unavailable
         """
         self._socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM)
         self._socket.connect( self._address )
@@ -43,20 +47,37 @@ class Socket():
             self._socket.close()
             self._socket = None
 
-    def write(self, data: bytes) -> object:
+    def write(self, data: bytes) -> None:
         """
-        Write to the amp (send data)
+        Write to the socket
+        
+        Parameters
+        ----------
+        data: bytes
+            The data to write to the socket
 
-        data: 
+        Raises
+        ------
+        SocketIncompleteTransmission if the full data is not transmitted
         """
+        length_data = len(data)
+        length_transmitted = 0
         if not self._socket:
             self.connect()
-        response = self._socket.send(data)
-        return response
+        length_transmitted = self._socket.send(data)
+        if length_transmitted != length_data:
+            raise SocketIncompleteTransmission(
+                length_transmitted, length_data
+            )
+        return
     
     def read(self) -> bytes:
         """
         Read data from amp. BLOCKS ON READING
+
+        Returns
+        -------
+        The byte array from the socket
         """
         if not self._socket:
             self._socket.connect()
