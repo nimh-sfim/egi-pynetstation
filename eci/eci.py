@@ -7,8 +7,9 @@ import sys
 import math
 
 from .exceptions import *
+from .util import sys_to_bytes
 
-def _sys_to_bytes(number: int, size: int) -> bytes:
+def sys_to_bytes(number: int, size: int) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder
 
     Parameters
@@ -55,8 +56,8 @@ def build_command(cmd: str, data: object = None) -> bytes:
     # the byte array to send
     tx = None
     # placeholders for building NTP bytearr
-    part_1 = _sys_to_bytes(0, 2)
-    part_2 = _sys_to_bytes(0, 2)
+    part_1 = sys_to_bytes(0, 2)
+    part_2 = sys_to_bytes(0, 2)
     # begin validating
     if cmd not in byte_table:
         raise InvalidECICmd(cmd)
@@ -78,20 +79,20 @@ def build_command(cmd: str, data: object = None) -> bytes:
         if not isinstance(data, int):
            raise ECIClockNonInteger(data)
         else:
-           tx += _sys_to_bytes(data, 4)
+           tx += sys_to_bytes(data, 4)
     elif cmd == 'NTPClockSync':
         if isinstance(data, int):
            # Convert number of seconds to 2-byte int with two 0-bytes
-           part_1 = _sys_to_bytes(data, 4)
-           part_2 = _sys_to_bytes(0, 4)
+           part_1 = sys_to_bytes(data, 4)
+           part_2 = sys_to_bytes(0, 4)
            tx += part_1 + part_2
         elif isinstance(data, float):
            # Split number into two parts and build NTP bytestr
            part_2, part_1 = math.modf(data)
            print(part_1)
-           part_1 = _sys_to_bytes(part_1, 4)
+           part_1 = sys_to_bytes(part_1, 4)
            part_2 = int(round(part_2/(2**-32)))
-           part_2 = _sys_to_bytes(part_2, 4)
+           part_2 = sys_to_bytes(part_2, 4)
            tx += part_1 + part_2
         elif isinstance(data, bytes):
            if len(data) == 8:

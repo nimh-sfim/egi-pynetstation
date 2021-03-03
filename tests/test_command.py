@@ -5,7 +5,8 @@ import sys
 import struct
 import pytest
 from eci.exceptions import *
-from eci.eci import build_command, _sys_to_bytes
+from eci.eci import build_command
+from eci.util import sys_to_bytes
 
 # Exception Testing
 def test_cmd_raises_bad_command():
@@ -37,7 +38,7 @@ def test_cmd_raises_for_non_integer_clock():
 
 def test_cmd_ntp_raises_for_invalid_byte():
     with pytest.raises(ECINTPInvalidByte):
-        test = build_command('NTPClockSync', _sys_to_bytes(2, 5))
+        test = build_command('NTPClockSync', sys_to_bytes(2, 5))
 
 
 def test_cmd_ntp_raises_for_invalid_type():
