@@ -36,14 +36,9 @@ def test_cmd_raises_for_non_integer_clock():
         test = build_command('ClockSync', 'cat')
 
 
-def test_cmd_ntp_raises_for_invalid_byte():
-    with pytest.raises(ECINTPInvalidByte):
+def test_cmd_ntp_raises_for_invalid_NTP():
+    with pytest.raises(ECINTPInvalid):
         test = build_command('NTPClockSync', sys_to_bytes(2, 5))
-
-
-def test_cmd_ntp_raises_for_invalid_type():
-    with pytest.raises(ECINTPInvalidType):
-        test = build_command('NTPClockSync', 'cat')
 
 
 def test_cmd_raises_for_nonbyte_data():
@@ -62,17 +57,7 @@ def test_cmd_formats_endian():
     assert test.decode('ascii') == 'QMAC-'
 
 
-def test_cmd_ntp_formats_int():
-    test = build_command('NTPClockSync', 1)
-    part_1 = test[1:5]
-    part_2 = test[5:]
-    val_1 = struct.unpack("<L", part_1)[0]
-    val_2 = struct.unpack("<L", part_2)[0]
-    assert val_1 == 1
-    assert val_2 == 0
-
-
-def test_cmd_ntp_formats_float():
+def test_cmd_ntp():
     test = build_command('NTPClockSync', 1 + 2**-32)
     part_1 = test[1:5]
     part_2 = test[5:]

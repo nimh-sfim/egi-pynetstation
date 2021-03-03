@@ -51,27 +51,9 @@ class ECIClockNonInteger(InvalidECICommand):
         self.message = '%s is not a valid integer' % noninteger
 
 
-class ECINTPException(InvalidECICommand):
-    """Exception to derive from for NTP exceptions"""
+class ECINTPInvalid(InvalidECICommand):
+    """Exception for failure to create NTPv4 time from given data"""
     pass
-
-
-class ECINTPNonNumber(ECINTPException):
-    """Exception for passing non-number values for NTP synchronization"""
-    def __init__(self, nonnumber: object) -> None:
-        self.message = '%s is not a number' % nonnumber
-
-
-class ECINTPInvalidByte(ECINTPException):
-    """Exception for passing an invalid NTP byte array"""
-    def __init__(self, bytearr: bytes) -> None:
-        self.message = '%d bytes given instead of 4' % len(bytearr)
-
-
-class ECINTPInvalidType(ECINTPException):
-    """Exception for invalid type for sending NTP sync command"""
-    def __init__(self, o: object) -> None:
-        self.message = 'Type %s is not valid for NTP sync' % type(o)
 
 
 class ECIDataNotBytes(InvalidECICommand):
@@ -79,3 +61,20 @@ class ECIDataNotBytes(InvalidECICommand):
     def __init__(self, o: object) -> None:
         t = type(o)
         self.message = 'Event Data requires type bytes, is type %s' % t
+
+# NTP exceptions
+class NTPException(ECIException):
+    """Exception to derive from for NTP exceptions"""
+    pass
+
+
+class NTPInvalidByte(NTPException):
+    """Exception for passing an invalid NTP byte array"""
+    def __init__(self, bytearr: bytes) -> None:
+        self.message = '%d bytes given instead of 8' % len(bytearr)
+
+
+class NTPInvalidType(NTPException):
+    """Exception for invalid type for NTP time formatting"""
+    def __init__(self, o: object) -> None:
+        self.message = 'Type %s is not valid for NTP sync' % type(o)
