@@ -4,6 +4,18 @@
 class ECIException(Exception):
     pass
 
+class ECIUnknownException(ECIException):
+    """Exception raised for an unknown problem"""
+    def __init__(self) -> None:
+        self.message = (
+            'An unknown exception has occurred in the ECI module.'
+            'This is likely due to programmer error.'
+            'Please post an issue at the following location:'
+            'https://github.com/nimh-sfim/PsychoPy3_EGI_NTP'
+        )
+
+
+# Invalid ECI commands
 class InvalidECICommand(ECIException):
     """Exception raised for trying to send an invalid ECI command"""
     pass
@@ -60,3 +72,10 @@ class ECINTPInvalidType(ECINTPException):
     """Exception for invalid type for sending NTP sync command"""
     def __init__(self, o: object) -> None:
         self.message = 'Type %s is not valid for NTP sync' % type(o)
+
+
+class ECIDataNotBytes(InvalidECICommand):
+    """Exception for non-bytes type for sending data"""
+    def __init__(self, o: object) -> None:
+        t = type(o)
+        self.message = 'Event Data requires type bytes, is type %s' % t

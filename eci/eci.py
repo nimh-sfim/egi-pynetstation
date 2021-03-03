@@ -22,89 +22,90 @@ def _sys_to_bytes(number: int, size: int) -> bytes:
     """
     return int(number).to_bytes(size, sys.byteorder)
 
-class Command:
-    """
-    Object containing only a command and data
+byte_table = {
+    'Query': b'Q',
+    'NewQuery': b'Y',
+    'Exit': b'X',
+    'BeginRecording': b'B',
+    'EndRecording': b'E',
+    'Attention': b'A',
+    'ClockSync': b'T',
+    'NTPClockSync': b'N',
+    'NTPReturnClock': b'S',
+    'EventData': b'D',
+}
 
-    Attributes
+requires_data = ('Query', 'ClockSync', 'NTPClockSync', 'EventData')
+
+allowed_endians = ('NTEL', 'MAC-', 'UNIX')
+
+def build_command(cmd: str, data: object = None) -> bytes:
+    """
+    Builds a byte array for ECI from the provided string and data
+
+    Parameters
     ----------
-    cmd : bytes
-        The ECI command as a byte
-    data : object
-        The ECI command's data
+    cmd: the command to send
+    data: the data associated with the command; may be one of several types
 
-    Static Attributes
-    -----------------
-    byte_table : map
-        Mapping of ECI commands to the byte representation to send
-    requires_data : tuple(str)
-        Commands which require data
-    allowed_endians : tuple(str)
-        Allowed values of an endian
+    Returns
+    -------
+    The array of bytes that should be sent over the network
     """
-
-    byte_table = {
-        'Query': b'Q',
-        'NewQuery': b'Y',
-        'Exit': b'X',
-        'BeginRecording': b'B',
-        'EndRecording': b'E',
-        'Attention': b'A',
-        'ClockSync': b'T',
-        'NTPClockSync': b'N',
-        'NTPReturnClock': b'S',
-        'EventData': b'D',
-    }
-
-    requires_data = ('Query', 'ClockSync', 'NTPClockSync', 'EventData')
-
-    allowed_endians = ('NTEL', 'MAC-', 'UNIX')
-
-    def __init__(self, cmd: str, data: object = None) -> None:
-        # placeholders for building NTP bytearr
-        part_1 = _sys_to_bytes(0, 2)
-        part_2 = _sys_to_bytes(0, 2)
-        # begin validating
-        if cmd not in Command.byte_table:
-            raise InvalidECICmd(cmd)
-        self.cmd = Command.byte_table[cmd]
-        if (cmd not in Command.requires_data):
-            if data is not None:
-                raise ECINoDataAllowed(cmd, data)
-            else:
-                self.data = None
-                return
-        if data is None:
-            raise ECIDataRequired(cmd)
-        # iterate to validate individual command data requirements:
-        if cmd == 'Query':
-            if not (data in Command.allowed_endians):
-                raise ECIIllegalEndian(data)
-            else:
-                self.data = data.encode('ASCII')
-        elif cmd == 'ClockSync':
-            if not isinstance(data, int):
-                raise ECIClockNonInteger(data)
-            else:
-                self.data = _sys_to_bytes(data, 4)
-        elif cmd == 'NTPClockSync':
-            if isinstance(data, int):
-                # Convert number of seconds to 2-byte int with two 0-bytes
-                part_1 = _sys_to_bytes(data, 4)
-                part_2 = _sys_to_bytes(0, 4)
-                self.data = part_1 + part_2
-            elif isinstance(data, float):
-                # Split number into two parts and build NTP bytestr
-                part_2, part_1 = math.modf(data)
-                print(part_1)
-                part_1 = _sys_to_bytes(part_1, 4)
-                part_2 = int(round(part_2/(2**-32)))
-                part_2 = _sys_to_bytes(part_2, 4)
-                self.data = part_1 + part_2
-            elif isinstance(data, bytes):
-                if len(data) != 8:
-                    raise ECINTPInvalidByte(data)
-                else:
-                    self.data = data
-            else:
-                raise ECINTPInvalidType(data)
+    # the byte array to send
+    tx = None
+    # placeholders for building NTP bytearr
+    part_1 = _sys_to_bytes(0, 2)
+    part_2 = _sys_to_bytes(0, 2)
+    # begin validating
+    if cmd not in byte_table:
+        raise InvalidECICmd(cmd)
+    tx = byte_table[cmd]
+    if (cmd not in requires_data):
+        if data is not None:
+           raise ECINoDataAllowed(cmd, data)
+        else:
+           return tx
+    if data is None:
+        raise ECIDataRequired(cmd)
+    # iterate to validate individual command data requirements:
+    if cmd == 'Query':
+        if data in allowed_endians:
+           tx += data.encode('ASCII')
+        else:
+           raise ECIIllegalEndian(data)
+    elif cmd == 'ClockSync':
+        if not isinstance(data, int):
+           raise ECIClockNonInteger(data)
+        else:
+           tx += _sys_to_bytes(data, 4)
+    elif cmd == 'NTPClockSync':
+        if isinstance(data, int):
+           # Convert number of seconds to 2-byte int with two 0-bytes
+           part_1 = _sys_to_bytes(data, 4)
+           part_2 = _sys_to_bytes(0, 4)
+           tx += part_1 + part_2
+        elif isinstance(data, float):
+           # Split number into two parts and build NTP bytestr
+           part_2, part_1 = math.modf(data)
+           print(part_1)
+           part_1 = _sys_to_bytes(part_1, 4)
+           part_2 = int(round(part_2/(2**-32)))
+           part_2 = _sys_to_bytes(part_2, 4)
+           tx += part_1 + part_2
+        elif isinstance(data, bytes):
+           if len(data) == 8:
+                tx += data
+           else:
+                raise ECINTPInvalidByte(data)
+        else:
+           raise ECINTPInvalidType(data)
+    elif cmd == 'EventData':
+    # TODO: make sure datagram is valid or construct helper
+        if isinstance(data, bytes):
+           tx += data
+        else:
+           raise ECIDataNotBytes(data)
+    else:
+        raise ECIUnknownException()
+    return tx
