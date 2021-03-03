@@ -5,9 +5,10 @@
 
 import sys
 import math
+from typing import Union
 
 from .exceptions import *
-from .util import sys_to_bytes, get_ntp_byte
+from .util import sys_to_bytes, sys_from_bytes, get_ntp_byte, get_ntp_float
 
 
 byte_table = {
@@ -90,3 +91,43 @@ def build_command(cmd: str, data: object = None) -> bytes:
     else:
         raise ECIUnknownException()
     return tx
+
+
+def parse_response(bytearr: bytes) -> Union[bool, float, int]:
+    """Parses ECI response
+
+    Parameters
+    ----------
+    bytearr: the byte array to parse (should be size 1)
+
+    Returns
+    -------
+    Either True or the value of the ECI Identity
+
+    Raises
+    ------
+    ECIResponseFailure for all failures
+    ECIFailure if the amp responds with failure
+    ECINoRecordingDeviceFailure if the failure is a result of no recording
+    TypeError if the object passed isn't type bytes
+    """
+    arrlength = 0
+    if isinstance(bytearr, bytes):
+        arrlength = len(bytearr)
+        if arrlength == 1:
+            if bytearr == b'Z':
+                return True
+            if bytearr == b'F':
+                raise ECIFailure()
+            if bytearr == b'R':
+                raise ECINoRecordingDeviceFailure()
+            else:
+                # Identify with version number as byte
+                return sys_from_bytes(bytearr)
+        elif arrlength == 8:
+            # We've been given an NTPv4-formatted bytearr
+            return get_ntp_float(bytearr)
+        else:
+            raise InvalidECIResponse(bytearr)
+    else:
+        raise InvalidECIResponse(bytearr)

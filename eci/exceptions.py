@@ -62,6 +62,36 @@ class ECIDataNotBytes(InvalidECICommand):
         t = type(o)
         self.message = 'Event Data requires type bytes, is type %s' % t
 
+
+# Amp Failure exceptions
+class ECIResponseFailure(ECIException):
+    """Exception to derive from for amp failures"""
+    pass
+
+
+class ECIFailure(ECIResponseFailure):
+    """Exception for when the amp responds with simple fail"""
+    def __init__(self) -> None:
+        self.message = 'Amp responded with Failure'
+
+
+class ECINoRecordingDeviceFailure(ECIResponseFailure):
+    """Exception for when the amp responds witth no recording device"""
+    def __init__(self):
+        self.message = 'No recording device found; please check setup'
+
+
+class InvalidECIResponse(ECIResponseFailure):
+    """Exception for when an invalid amp response is passed"""
+    def __init__(self, o: object) -> None:
+        if isinstance(o, bytes):
+            self.message = (
+                'Invalid ECI response length: %d of 1' % len(o)
+            )
+        else:
+            self.message = 'Invalid ECI response type: %s' % type(o)
+
+
 # NTP exceptions
 class NTPException(ECIException):
     """Exception to derive from for NTP exceptions"""
