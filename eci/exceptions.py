@@ -25,6 +25,23 @@ class ECIUnknownException(ECIException):
         )
 
 
+# Netstation Errors
+class NetStationError(ECIException):
+    pass
+
+
+class NetStationUnconnected(NetStationError):
+    """Exception raised for attempting communication before connecting"""
+    def __init__(self) -> None:
+        self.message = 'Attempted operation before connecting to amp'
+
+
+class NetStationIllegalArgument(NetStationError):
+    """Exception for passing an illegal argument"""
+    def __init__(self, arg: object) -> None:
+        self.message = '%s is an illegal argument' % arg
+
+
 # Invalid ECI commands
 class InvalidECICommand(ECIException):
     """Exception raised for trying to send an invalid ECI command"""
@@ -94,10 +111,9 @@ class ECINoRecordingDeviceFailure(ECIResponseFailure):
 class InvalidECIResponse(ECIResponseFailure):
     """Exception for when an invalid amp response is passed"""
     def __init__(self, o: object) -> None:
+        # TODO: add more specificity with sub-exceptions
         if isinstance(o, bytes):
-            self.message = (
-                'Invalid ECI response length: %d of 1' % len(o)
-            )
+            self.message = 'Invalid ECI response length: %s' % o
         else:
             self.message = 'Invalid ECI response type: %s' % type(o)
 

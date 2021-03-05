@@ -24,9 +24,16 @@ byte_table = {
     "EventData": b"D",
 }
 
-requires_data = ("Query", "ClockSync", "NTPClockSync", "EventData")
+requires_data = ("Query", "ClockSync", "NTPClockSync", "EventData",
+                    'NTPReturnClock')
+# NOTE: NTPReturnClock does not indicate a need to send an NTPv4 in the
+# SDK documentation; however, testing indicates that it is required
 
 allowed_endians = ("NTEL", "MAC-", "UNIX")
+
+# Python converts the bytes to ints when indexing; this is more legible
+INT_VAL_I = 73
+INT_VAL_S = 83
 
 
 def build_command(cmd: str, data: object = None) -> bytes:
@@ -77,7 +84,7 @@ def build_command(cmd: str, data: object = None) -> bytes:
             raise ECIClockNonInteger(data)
         else:
             tx += sys_to_bytes(data, 4)
-    elif cmd == "NTPClockSync":
+    elif cmd == "NTPClockSync" or cmd == 'NTPReturnClock':
         try:
             tx += get_ntp_byte(data)
         except:
@@ -122,11 +129,26 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             if bytearr == b'R':
                 raise ECINoRecordingDeviceFailure()
             else:
-                # Identify with version number as byte
-                return sys_from_bytes(bytearr)
+                raise InvalidECIResponse(bytearr)
+        elif arrlength == 2:
+            # Identify version number
+            # NOTE: this deviates from the SDK documentation, which
+            # indicates a 1-byte response
+            if bytearr[0] == INT_VAL_I:
+                return sys_from_bytes(bytearr[1:])
+            else:
+                raise InvalidECIResponse(bytearr)
         elif arrlength == 8:
             # We've been given an NTPv4-formatted bytearr
             return get_ntp_float(bytearr)
+        elif arrlength == 9:
+            # We've been given an 'S' plus NTPv4-formatted bytearr
+            # NOTE: this return of size 9 bytes rather than 8 is not
+            # properly documented in the SDK guide
+            if bytearr[0] == INT_VAL_S:
+                return get_ntp_float(bytearr[1:])
+            else:
+                raise InvalidECIResponse(bytearr)
         else:
             raise InvalidECIResponse(bytearr)
     else:
