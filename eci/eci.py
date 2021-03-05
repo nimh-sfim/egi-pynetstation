@@ -3,8 +3,6 @@
 
 """ECI controls and returns"""
 
-import sys
-import math
 from typing import Union
 
 from .exceptions import *
@@ -25,7 +23,7 @@ byte_table = {
 }
 
 requires_data = ("Query", "ClockSync", "NTPClockSync", "EventData",
-                    'NTPReturnClock')
+                 'NTPReturnClock')
 # NOTE: NTPReturnClock does not indicate a need to send an NTPv4 in the
 # SDK documentation; however, testing indicates that it is required
 
@@ -59,9 +57,6 @@ def build_command(cmd: str, data: object = None) -> bytes:
     """
     # the byte array to send
     tx = None
-    # placeholders for building NTP bytearr
-    part_1 = sys_to_bytes(0, 2)
-    part_2 = sys_to_bytes(0, 2)
     # begin validating
     if cmd not in byte_table:
         raise InvalidECICmd(cmd)
@@ -87,7 +82,7 @@ def build_command(cmd: str, data: object = None) -> bytes:
     elif cmd == "NTPClockSync" or cmd == 'NTPReturnClock':
         try:
             tx += get_ntp_byte(data)
-        except:
+        except NTPException:
             raise ECINTPInvalid()
     elif cmd == "EventData":
         # TODO: make sure datagram is valid or construct helper
@@ -122,7 +117,7 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
     if isinstance(bytearr, bytes):
         arrlength = len(bytearr)
         if arrlength == 1:
-            if bytearr == b'Z':
+            if bytearr == b'Z' or b'I':
                 return True
             if bytearr == b'F':
                 raise ECIFailure()

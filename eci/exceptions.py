@@ -4,6 +4,7 @@
 class SocketException(Exception):
     pass
 
+
 class SocketIncompleteTransmission(Exception):
     """Exception for incomplete transmission on write to address"""
     def __init__(self, transmitted: int, expected: int):
@@ -11,8 +12,10 @@ class SocketIncompleteTransmission(Exception):
             '%d bytes of %d were transmitted' % (transmitted, expected)
         )
 
+
 class ECIException(Exception):
     pass
+
 
 class ECIUnknownException(ECIException):
     """Exception raised for an unknown problem"""

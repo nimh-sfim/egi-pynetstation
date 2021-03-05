@@ -10,6 +10,7 @@ from .exceptions import *
 
 ntp_res = 2**-32
 
+
 def sys_to_bytes(number: int, size: int) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder
 
@@ -55,9 +56,9 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
     NTPException for invalid input; one of several types
     NTPInvalidType for passing a value that is not a number or byte array
     NTPInvalidByte if the byte array is not of length 8
-    OverflowError if the number of seconds cannot be represented as 4 bytes
+    OverflowError if the number of seconds cannot be represented
     """
-    # Placeholders as we build the NTP 
+    # Placeholders as we build the NTP
     part_1 = sys_to_bytes(0, 4)
     part_2 = sys_to_bytes(0, 4)
     # Numbers to use for splitting a float into two integers
@@ -71,7 +72,7 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
         # Split number into two parts and build NTP bytestr
         subsecond_portion, second_portion = modf(number)
         part_1 = sys_to_bytes(second_portion, 4)
-        part_2 = sys_to_bytes(round(subsecond_portion/ntp_res), 4)
+        part_2 = sys_to_bytes(round(subsecond_portion / ntp_res), 4)
         return part_1 + part_2
     elif isinstance(number, bytes):
         if len(number) == 8:
@@ -110,7 +111,7 @@ def get_ntp_float(bytearr: bytes) -> float:
             part_1 = bytearr[0:4]
             part_2 = bytearr[4:]
             second_portion = sys_from_bytes(part_1)
-            subsecond_portion = sys_from_bytes(part_2)*ntp_res
+            subsecond_portion = sys_from_bytes(part_2) * ntp_res
             return second_portion + subsecond_portion
         else:
             raise NTPInvalidByte(bytearr)

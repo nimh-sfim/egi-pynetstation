@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import socket
-import sys
+from .exceptions import *
+
 
 class Socket():
     """
@@ -25,7 +26,6 @@ class Socket():
         self._address = (address, port)
         self._socket = None
 
-
     def connect(self) -> None:
         """
         Connect to the TCP/IP socket
@@ -34,11 +34,10 @@ class Socket():
         ------
         ConnectionRefusedError if the address is unavailable
         """
-        self._socket = socket.socket( socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.connect( self._address )
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.connect(self._address)
         self._socket.settimeout(Socket.timeout)
 
-  
     def disconnect(self) -> None:
         """
         Disconnect from the socket
@@ -50,7 +49,7 @@ class Socket():
     def write(self, data: bytes) -> None:
         """
         Write to the socket
-        
+
         Parameters
         ----------
         data: bytes
@@ -69,8 +68,7 @@ class Socket():
             raise SocketIncompleteTransmission(
                 length_transmitted, length_data
             )
-        return
-    
+
     def read(self) -> bytes:
         """
         Read data from amp. BLOCKS ON READING

@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import sys
-import time
 from typing import Union
 from .eci import build_command, parse_response, allowed_endians
 from .socket_wrapper import Socket
@@ -40,7 +38,7 @@ class NetStation(object):
         to get the complete specification for NetStation behavior rather
         than the SDK guide. Notable deviations:
         - eci_NTPReturnClock *requires* an NTPv4 timecode, even though in
-          the documentation "Experimental Control Interface (ECI) Commands 
+          the documentation "Experimental Control Interface (ECI) Commands
           and Return Values" table, "Follows controller command if more
           data expected" column is blank (page 8).
         - eci_NTPReturnClock returns a byte representing 'S', followed by
@@ -68,6 +66,24 @@ class NetStation(object):
         self._endian = endian
         self._mstime = None
 
+    def check_connected(func) -> None:
+        """Decorator to raise exception if not connected
+
+        Parameters
+        ----------
+        func: a function which has no parameters
+
+        Raises
+        ------
+        NetStationUnconnected
+            If NetStation hasn't had .connect() run yet
+        """
+        def wrapper(*args):
+            if args[0]._connected:
+                func(*args)
+            else:
+                raise NetStationUnconnected()
+        return wrapper
 
     def connect(self, clock: str = 'ntp') -> None:
         """Connect to the Netstation machine via TCP/IP
@@ -78,9 +94,9 @@ class NetStation(object):
 
         Raises
         ------
-        NetStationIllegalArgument 
+        NetStationIllegalArgument
             If clock is not 'ntp' or 'simple'
-        ConnectionRefusedError 
+        ConnectionRefusedError
             If the server is not listening
         """
         if clock not in ('ntp', 'simple'):
@@ -96,19 +112,40 @@ class NetStation(object):
             # TODO: implement simple clock correctly
             self._command('ClockSync', 48)
 
-
+    @check_connected
     def disconnect(self) -> None:
         """Close the TCP/IP connection."""
-        if not self._connected:
-            raise NetStationUnconnected()
         self._socket.disconnect()
         self._connected = False
 
+    @check_connected
+    def begin_rec(self) -> None:
+        """Begin Recording"""
+        self._command('BeginRecording')
 
-    def _command(
-            self, cmd: str, data: object = None
-        ) -> Union[bool, float, int]:
-        """Send a command to the amplifier 
+    @check_connected
+    def end_rec(self) -> None:
+        """End Recording"""
+        self._command('EndRecording')
+
+    @check_connected
+    def send_event(self, data: bytes) -> None:
+        """Send event to amplifier
+
+        Parameters
+        ----------
+        data: the event data to send
+
+        Notes
+        -----
+        Current does not check that event data is valid!
+        """
+        # TODO: make sure data sent is valid; implement in eci.eci and
+        # reference here
+        self._command('EventData', data)
+
+    def _command(self, cmd: str, data=None) -> Union[bool, float, int]:
+        """Send a command to the amplifier
 
         Parameters
         ----------
