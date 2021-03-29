@@ -117,7 +117,7 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
     if isinstance(bytearr, bytes):
         arrlength = len(bytearr)
         if arrlength == 1:
-            if bytearr == b'Z' or b'I':
+            if bytearr == b'Z' or bytearr == b'I':
                 return True
             if bytearr == b'F':
                 raise ECIFailure()
