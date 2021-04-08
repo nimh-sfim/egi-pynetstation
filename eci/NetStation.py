@@ -1,11 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+from time import time
+from math import floor
 from typing import Union
+
+from ntplib import system_to_ntp_time
+
 from .eci import build_command, parse_response, allowed_endians
 from .socket_wrapper import Socket
 from .exceptions import *
 
+# Define the NTP epoch
 
 class NetStation(object):
     """Netstation object to interact with the amplifier.
@@ -107,10 +113,11 @@ class NetStation(object):
         self._command('Attention')
         if clock == 'ntp':
             # TODO: implement NTP correctly
-            self._command('NTPClockSync', 48)
+            t = system_to_ntp_time(floor(time()))
+            self._command('NTPClockSync', t)
         elif clock == 'simple':
-            # TODO: implement simple clock correctly
-            self._command('ClockSync', 48)
+            t = time()
+            self._command('ClockSync', t)
 
     @check_connected
     def disconnect(self) -> None:
