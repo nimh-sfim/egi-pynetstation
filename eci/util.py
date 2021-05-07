@@ -11,7 +11,7 @@ from .exceptions import *
 ntp_res = 2**-32
 
 
-def sys_to_bytes(number: int, size: int) -> bytes:
+def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder
 
     Parameters
@@ -23,10 +23,10 @@ def sys_to_bytes(number: int, size: int) -> bytes:
     -------
     The byte string representation of the number
     """
-    return int(number).to_bytes(size, sys.byteorder)
+    return int(number).to_bytes(size, sys.byteorder, signed=signed)
 
 
-def sys_from_bytes(bytearr: bytes) -> int:
+def sys_from_bytes(bytearr: bytes, signed: bool = False) -> int:
     """Simplified from_bytes that always uses sys.byteorder
 
     Parameters
@@ -37,7 +37,7 @@ def sys_from_bytes(bytearr: bytes) -> int:
     -------
     The integer representation of the bytes using system byte order
     """
-    return int.from_bytes(bytearr, sys.byteorder)
+    return int.from_bytes(bytearr, sys.byteorder, signed=signed)
 
 
 def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
