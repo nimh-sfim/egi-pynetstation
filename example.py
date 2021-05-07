@@ -7,7 +7,7 @@ def main():
     eci_client.connect()
     eci_client.begin_rec()
     bs = package_event(1, .002, 'abcd', 'abcd', 'abcd', 
-        {'abcd': 5.24}
+            {'dat1': 5.24, 'dat2': 'dog', 'dat3': 7}
     )
     eci_client.send_event(bs)
     eci_client.end_rec()
