@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from time import time
+from time import time, mktime
 from math import floor
 from typing import Union
 

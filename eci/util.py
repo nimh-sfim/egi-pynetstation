@@ -6,12 +6,13 @@
 import sys
 from math import modf
 from typing import Union
+from struct import pack
 from .exceptions import *
 
 ntp_res = 2**-32
 
 
-def sys_to_bytes(number: int, size: int) -> bytes:
+def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder
 
     Parameters
@@ -23,10 +24,10 @@ def sys_to_bytes(number: int, size: int) -> bytes:
     -------
     The byte string representation of the number
     """
-    return int(number).to_bytes(size, sys.byteorder)
+    return int(number).to_bytes(size, sys.byteorder, signed=signed)
 
 
-def sys_from_bytes(bytearr: bytes) -> int:
+def sys_from_bytes(bytearr: bytes, signed: bool = False) -> int:
     """Simplified from_bytes that always uses sys.byteorder
 
     Parameters
@@ -37,7 +38,7 @@ def sys_from_bytes(bytearr: bytes) -> int:
     -------
     The integer representation of the bytes using system byte order
     """
-    return int.from_bytes(bytearr, sys.byteorder)
+    return int.from_bytes(bytearr, sys.byteorder, signed=signed)
 
 
 def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
@@ -58,22 +59,14 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
     NTPInvalidByte if the byte array is not of length 8
     OverflowError if the number of seconds cannot be represented
     """
-    # Placeholders as we build the NTP
-    part_1 = sys_to_bytes(0, 4)
-    part_2 = sys_to_bytes(0, 4)
-    # Numbers to use for splitting a float into two integers
     second_portion = 0
     subsecond_portion = 0
     if isinstance(number, int):
         # Convert number of seconds to 32-bit int with 2 0-bytes
-        part_1 = sys_to_bytes(number, 4)
-        return part_1 + part_2
-    if isinstance(number, float):
+        second_portion = number
+    elif isinstance(number, float):
         # Split number into two parts and build NTP bytestr
         subsecond_portion, second_portion = modf(number)
-        part_1 = sys_to_bytes(second_portion, 4)
-        part_2 = sys_to_bytes(round(subsecond_portion / ntp_res), 4)
-        return part_1 + part_2
     elif isinstance(number, bytes):
         if len(number) == 8:
             return number
@@ -81,6 +74,7 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
             raise NTPInvalidByte(number)
     else:
         raise NTPInvalidType(number)
+    return pack('II', second_portion, subsecond_portion)
 
 
 def get_ntp_float(bytearr: bytes) -> float:
