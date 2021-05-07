@@ -6,8 +6,6 @@
 from struct import pack
 from typing import Union
 
-import numpy as np
-
 from .exceptions import *
 from .util import sys_to_bytes, sys_from_bytes, get_ntp_byte, get_ntp_float
 
@@ -227,11 +225,12 @@ def package_event(
 
     # Build block for datagram header
     block = (
-        sys_to_bytes(int(start / MPS), int(duration / MPS), 2) +
+        pack('i', int(start * MPS)) +
+        pack('I', int(duration * MPS)) +
         bytes(event_type, 'ascii') +
-        sys_to_bytes(len_label, 1) + bytes(label, 'ascii') +
-        sys_to_bytes(len_desc, 1) + bytes(desc, 'ascii') +
-        sys_to_bytes(nkeys, 1)
+        pack('B', len_label) + bytes(label, 'ascii') +
+        pack('B', len_desc) + bytes(desc, 'ascii') +
+        pack('B', nkeys)
     )
 
     # Build blocks for key-value pairs
@@ -253,16 +252,16 @@ def package_event(
         # Check the value's validity
         if isinstance(value, bool):
             ktype = 'bool'
-            klen = 1
-            kdata = sys_to_bytes(value, 1)
+            klen = 1 
+            kdata = pack('?', value)
         elif isinstance(value, float):
             ktype = 'doub'
-            klen = 1
-            kdata = bytes(np.double(value))
+            klen = 8
+            kdata = pack('d', value)
         elif isinstance(value, int):
             ktype = 'long'
-            klen = 1
-            kdata = bytes(np.long(value))
+            klen = 4
+            kdata = pack('i', value)
         elif isinstance(value, str):
             ktype = 'TEXT'
             klen = len(value)
@@ -278,15 +277,16 @@ def package_event(
         key_block += (
             bytes(key, 'ascii') +
             bytes(ktype, 'ascii') +
-            sys_to_bytes(klen, 2) +
+            pack('H', klen) +
             kdata
         )
 
     # Put all blocks together
     len_all_blocks = len(block) + len(key_block)
 
-    datagram = sys_to_bytes(len_all_blocks, 2) + block + key_block
-
+    datagram = pack('H', len_all_blocks) + block + key_block
+    
+    print(ktype)
     print(datagram)
 
     return datagram
