@@ -7,6 +7,7 @@ import sys
 from math import modf
 from typing import Union
 from struct import pack
+from time import strftime, localtime
 from .exceptions import *
 
 ntp_res = 2**-32
@@ -67,6 +68,9 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
     elif isinstance(number, float):
         # Split number into two parts and build NTP bytestr
         subsecond_portion, second_portion = modf(number)
+        subsecond_portion /= ntp_res
+        second_portion = int(second_portion)
+        subsecond_portion = int(subsecond_portion)
     elif isinstance(number, bytes):
         if len(number) == 8:
             return number
@@ -111,3 +115,19 @@ def get_ntp_float(bytearr: bytes) -> float:
             raise NTPInvalidByte(bytearr)
     else:
         raise NTPInvalidType(bytearr)
+
+
+def format_time(time: float) -> str:
+    """Format the float time in a human readable format
+
+    Parameter
+    ---------
+    time: float
+	Floating representation of a time, from time.time()
+
+    Returns
+    -------
+    A string representation of the time in human-readable format
+    """
+    fmt = '%Y-%m-%d:%I:%M%:%S'
+    return strftime(fmt, localtime(time))

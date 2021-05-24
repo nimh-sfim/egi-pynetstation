@@ -223,7 +223,7 @@ def package_event(
 
     # Build block for datagram header
     block = (
-        pack('I', int(start * MPS)) +
+        pack('i', int(start * MPS)) +
         pack('I', int(duration * MPS)) +
         bytes(event_type, 'ascii') +
         pack('B', len_label) + bytes(label, 'ascii') +
@@ -284,6 +284,4 @@ def package_event(
 
     datagram = pack('H', len_all_blocks) + block + key_block
     
-    print(datagram)
-
     return datagram

@@ -23,6 +23,7 @@ def main():
     eci_client.begin_rec()
     bs = package_event(0, .001, 'abcd', 'abcd', 'abcd', {})
     eci_client.send_event(bs)
+    eci_client.resync()
     eci_client.end_rec()
     eci_client.disconnect()
 if __name__ == '__main__':

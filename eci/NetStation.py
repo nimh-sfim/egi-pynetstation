@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from time import time, mktime
+from time import time, mktime, localtime
 from math import floor
 from typing import Union
 
-from ntplib import system_to_ntp_time
+from ntplib import system_to_ntp_time, ntp_to_system_time
 
 from .eci import build_command, parse_response, allowed_endians
+from .util import format_time
 from .socket_wrapper import Socket
 from .exceptions import *
 
@@ -115,6 +116,8 @@ class NetStation(object):
             # TODO: implement NTP correctly
             t = system_to_ntp_time(floor(time()))
             self._command('NTPClockSync', t)
+            # TODO: remove debug
+            print('Sent local time: ' + format_time(t))
         elif clock == 'simple':
             t = time()
             self._command('ClockSync', t)
@@ -134,6 +137,21 @@ class NetStation(object):
     def end_rec(self) -> None:
         """End Recording"""
         self._command('EndRecording')
+
+    @check_connected
+    def resync(self) -> float:
+        """Re-synchronize with the amplifier
+
+        Returns
+        -------
+        The current NTP epoch time
+        """
+        t = time()
+        data = system_to_ntp_time(t)
+        self._mstime = self._command('NTPReturnClock', data)
+        # TODO: remove this debug info
+        print('Sent local time: ' + format_time(t))
+        print('Received amp time: ' + format_time(self._mstime))
 
     @check_connected
     def send_event(self, data: bytes) -> None:
@@ -177,3 +195,13 @@ class NetStation(object):
         eci_cmd = build_command(cmd, data)
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
+
+    def _last_sync(self) -> float:
+        """Get last sync time in NTP epoch
+
+        Returns
+        -------
+        The amplifer time of last sync in system time
+        """
+
+        return ntp_to_system_time(self._mstime)
