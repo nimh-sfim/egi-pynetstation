@@ -7,7 +7,7 @@ from typing import Union
 
 from ntplib import system_to_ntp_time, ntp_to_system_time
 
-from .eci import build_command, parse_response, allowed_endians
+from .eci import build_command, parse_response, allowed_endians, package_event
 from .util import format_time
 from .socket_wrapper import Socket
 from .exceptions import *
@@ -85,9 +85,9 @@ class NetStation(object):
         NetStationUnconnected
             If NetStation hasn't had .connect() run yet
         """
-        def wrapper(*args):
+        def wrapper(*args, **kwargs):
             if args[0]._connected:
-                func(*args)
+                func(*args, **kwargs)
             else:
                 raise NetStationUnconnected()
         return wrapper
@@ -154,7 +154,15 @@ class NetStation(object):
         print('Received amp time: ' + format_time(self._mstime))
 
     @check_connected
-    def send_event(self, data: bytes) -> None:
+    def send_event(
+        self,
+        start: float,
+        duration: float = 0.001,
+        event_type: str = ' '*4,
+        label: str = ' '*4,
+        desc: str = ' '*4,
+        data: dict = {},
+    ) -> None:
         """Send event to amplifier
 
         Parameters
@@ -167,6 +175,9 @@ class NetStation(object):
         """
         # TODO: make sure data sent is valid; implement in eci.eci and
         # reference here
+        data = package_event(
+            start, duration, event_type, label, desc, data
+        )
         self._command('EventData', data)
 
     def _command(self, cmd: str, data=None) -> Union[bool, float, int]:
