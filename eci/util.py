@@ -8,10 +8,12 @@ from math import modf
 from typing import Union
 from struct import pack
 from time import strftime, localtime
+from datetime import datetime, timezone
 from .exceptions import *
 
 ntp_res = 2**-32
-
+ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
+unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder

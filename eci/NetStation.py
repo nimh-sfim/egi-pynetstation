@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from time import time, mktime, gmtime
+from datetime import timezone, datetime
+from time import time
 from math import floor
 from typing import Union
 
 from ntplib import system_to_ntp_time, ntp_to_system_time
 
 from .eci import build_command, parse_response, allowed_endians, package_event
-from .util import format_time
+from .util import format_time, ntp_epoch, unix_epoch
 from .socket_wrapper import Socket
 from .exceptions import *
 
-# Define the NTP epoch
 
 class NetStation(object):
     """Netstation object to interact with the amplifier.
@@ -114,12 +114,12 @@ class NetStation(object):
         self._command('Attention')
         if clock == 'ntp':
             # TODO: implement NTP correctly
-            t = gmtime()
+            t = (datetime.now(timezone.utc) - unix_epoch).total_seconds()
             print('Sent local time:  ' + format_time(t))
             t = system_to_ntp_time(t)
             self._command('NTPClockSync', t)
         elif clock == 'simple':
-            t = gmtime()
+            t = (datetime.now() - unix_epoch).total_seconds()
             self._command('ClockSync', t)
 
     @check_connected
@@ -146,7 +146,7 @@ class NetStation(object):
         -------
         The current NTP epoch time
         """
-        t = gmtime()
+        t = (datetime.now(timezone.utc) - unix_epoch).total_seconds()
         data = system_to_ntp_time(t)
         self._mstime = self._command('NTPReturnClock', data)
         # TODO: remove this debug info
