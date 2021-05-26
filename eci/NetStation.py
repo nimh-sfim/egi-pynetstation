@@ -29,7 +29,7 @@ class NetStation(object):
         Time in milliseconds last retrieved
     """
     # TODO: implement proper clock sync, update _mstime
-    def __init__(self, ipv4: str, port: int, endian: str = 'MAC-') -> None:
+    def __init__(self, ipv4: str, port: int, endian: str = 'NTEL') -> None:
         """Constructor for NetStation
 
         Parameters
