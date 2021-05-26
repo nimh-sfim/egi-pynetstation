@@ -68,8 +68,9 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
     elif isinstance(number, float):
         # Split number into two parts and build NTP bytestr
         subsecond_portion, second_portion = modf(number)
+        subsecond_portion /= ntp_res
         second_portion = int(second_portion)
-        subsecond_portion = 0
+        subsecond_portion = int(subsecond_portion)
     elif isinstance(number, bytes):
         if len(number) == 8:
             return number
@@ -128,5 +129,8 @@ def format_time(time: float) -> str:
     -------
     A string representation of the time in human-readable format
     """
+    subseconds, seconds = modf(time)
+    subseconds *= 1e6
+    subseconds = int(subseconds)
     fmt = '%Y-%m-%d:%I:%M%:%S'
-    return strftime(fmt, localtime(time))
+    return strftime(fmt, localtime(time)) +  '.' + str(subseconds)

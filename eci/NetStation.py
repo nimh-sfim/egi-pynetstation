@@ -114,7 +114,7 @@ class NetStation(object):
         self._command('Attention')
         if clock == 'ntp':
             # TODO: implement NTP correctly
-            t = floor(time())
+            t = time()
             print('Sent local time:  ' + format_time(t))
             t = system_to_ntp_time(t)
             self._command('NTPClockSync', t)
