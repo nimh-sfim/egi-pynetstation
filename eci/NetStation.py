@@ -118,7 +118,6 @@ class NetStation(object):
             print('Sent local time:  ' + format_time(t))
             t = system_to_ntp_time(t)
             self._command('NTPClockSync', t)
-            self.resync()
         elif clock == 'simple':
             t = time()
             self._command('ClockSync', t)
