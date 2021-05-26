@@ -21,13 +21,19 @@ def main():
     eci_client = NetStation(IP, port)
     eci_client.connect()
     eci_client.begin_rec()
-    bs = package_event(0, .001, 'abcd', 'abcd', 'abcd', {})
+    sleep(3)
     eci_client.send_event(
-        0.0,
+        3.0,
         event_type='text',
         data={'abcd': 1234},
     )
     eci_client.resync()
+    sleep(4)
+    eci_client.send_event(
+        4.0,
+        event_type='hipm',
+        data={'hola': 'Greetings, Pete!'},
+    )
     eci_client.end_rec()
     eci_client.disconnect()
 if __name__ == '__main__':
