@@ -114,10 +114,11 @@ class NetStation(object):
         self._command('Attention')
         if clock == 'ntp':
             # TODO: implement NTP correctly
-            t = system_to_ntp_time(floor(time()))
+            t = floor(time())
+            print('Sent local time:  ' + format_time(t))
+            t = system_to_ntp_time(t)
             self._command('NTPClockSync', t)
             # TODO: remove debug
-            print('Sent local time: ' + format_time(t))
         elif clock == 'simple':
             t = time()
             self._command('ClockSync', t)
@@ -151,7 +152,8 @@ class NetStation(object):
         self._mstime = self._command('NTPReturnClock', data)
         # TODO: remove this debug info
         print('Sent local time: ' + format_time(t))
-        print('Received amp time: ' + format_time(self._mstime))
+        amptime = ntp_to_system_time(self._mstime)
+        print('Received amp time: ' + format_time(amptime))
 
     @check_connected
     def send_event(
