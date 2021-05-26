@@ -30,7 +30,7 @@ def main():
     eci_client.resync()
     sleep(4)
     eci_client.send_event(
-        4.0,
+        7.0,
         event_type='hipm',
         data={'hola': 'Greetings, Pete!'},
     )
