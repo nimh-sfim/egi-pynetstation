@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from time import time, mktime, localtime
+from time import time, mktime, gmtime
 from math import floor
 from typing import Union
 
@@ -114,12 +114,12 @@ class NetStation(object):
         self._command('Attention')
         if clock == 'ntp':
             # TODO: implement NTP correctly
-            t = time()
+            t = gmtime()
             print('Sent local time:  ' + format_time(t))
             t = system_to_ntp_time(t)
             self._command('NTPClockSync', t)
         elif clock == 'simple':
-            t = time()
+            t = gmtime()
             self._command('ClockSync', t)
 
     @check_connected
@@ -146,7 +146,7 @@ class NetStation(object):
         -------
         The current NTP epoch time
         """
-        t = time()
+        t = gmtime()
         data = system_to_ntp_time(t)
         self._mstime = self._command('NTPReturnClock', data)
         # TODO: remove this debug info
