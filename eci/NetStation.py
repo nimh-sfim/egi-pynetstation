@@ -126,6 +126,7 @@ class NetStation(object):
             response = c.request(ntp_ip, version=3)
             t = time.time()
             ntp_t = system_to_ntp_time(t) - response.offset
+            self._offset = response.offset
             tt = self._command('NTPClockSync', ntp_t)
             print('Sent local time:  ' + format_time(t))
             self._syncepoch = t
@@ -194,9 +195,12 @@ class NetStation(object):
         # TODO: make sure data sent is valid; implement in eci.eci and
         # reference here
         if start == 'now':
-            start = time.time() - self._syncepoch
+            start = time.time() - self._syncepoch + self._offset
         elif isinstance(start, float):
-            start = self._recording_start - self._syncepoch + start
+            start = (
+                self._recording_start - self._syncepoch + 
+                start + self._offset
+            )
         else:
             t_start = type(start)
             return TyepError(
