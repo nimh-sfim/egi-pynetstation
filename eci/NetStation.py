@@ -189,7 +189,6 @@ class NetStation(object):
         label: str = ' '*4,
         desc: str = ' '*4,
         data: dict = {},
-        resync: bool = False,
     ) -> None:
         """Send event to amplifier
 
@@ -215,8 +214,6 @@ class NetStation(object):
             return TyepError(
                 f'Start is type {t_start}, should be str "now" or float'
             )
-        if resync:
-            self.resync()
         data = package_event(
             start, duration, event_type, label, desc, data
         )
@@ -249,6 +246,24 @@ class NetStation(object):
         print(f'{cyan}Sending command: {eci_cmd}{reset}')
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
+
+    def rec_start(self) -> float:
+        """Get recording start time from time.time()
+
+        Returns
+        -------
+        Floating-point time of recording start
+        """
+        return self._recording_start
+
+    def since_start(self) -> float:
+        """Get difference in time since recording start
+
+        Returns
+        -------
+        The number of seconds since recording start
+        """
+        return time.time() - self._recording_start
 
     def _last_sync(self) -> float:
         """Get last sync time in NTP epoch

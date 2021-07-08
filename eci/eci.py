@@ -153,6 +153,8 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             # ADMONITION: app and amp behavior diverge incompatibly
             # The APP will put 'S' followed by the NTP bytes
             # The AMP will put NTP bytes followed by 'Z'
+            # However, sometimes the amp will ALSO respond with S at the
+            # beginning.
             # We've been given an 'S' plus NTPv4-formatted bytearr
             # NOTE: this return of size 9 bytes rather than 8 is not
             # properly documented in the SDK guide
@@ -165,9 +167,14 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
                 )
                 return seconds + subseconds * 2**-32
             else:
-                # Try app (untested)
-                (char, seconds, subseconds) = unpack('cII', bytearr)
-                if char == b'S':
+                # Try S start (amp or app)
+                char = bytearr[0]
+                # Note: we can't unpack cII because integer alignment
+                # forces the char to occupy four bytes, rather than just
+                # one. Since unpack is designed to unpack C-structures,
+                # this alignment ends up being accounted for.
+                (seconds, subseconds) = unpack('II', bytearr[1:])
+                if char == INT_VAL_S:
                     return seconds + subseconds * 2**-32
                 else:
                     # Just broken
