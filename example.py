@@ -15,7 +15,7 @@ def main():
         port = 9885
     elif args.mode == 'amp':
         IP = '10.10.10.42'
-        IP_amp = '10.10.51'
+        IP_amp = '10.10.10.51'
         port = 55513
     else:
         raise RuntimeError('Something strange has occured')
