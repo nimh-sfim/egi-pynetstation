@@ -125,10 +125,11 @@ class NetStation(object):
             c = NTPClient()
             response = c.request(ntp_ip, version=3)
             t = time.time()
-            ntp_t = system_to_ntp_time(t) - response.offset
+            ntp_t = system_to_ntp_time(t)
             self._offset = response.offset
             tt = self._command('NTPClockSync', ntp_t)
             print('Sent local time:  ' + format_time(t))
+            print(f'NTP offset is approx {self._offset}')
             self._syncepoch = t
         elif clock == 'simple':
             t = time.time()
