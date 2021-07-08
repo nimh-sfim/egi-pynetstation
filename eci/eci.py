@@ -150,18 +150,28 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             # We've been given an NTPv4-formatted bytearr
             return get_ntp_float(bytearr)
         elif arrlength == 9:
+            # ADMONITION: app and amp behavior diverge incompatibly
+            # The APP will put 'S' followed by the NTP bytes
+            # The AMP will put NTP bytes followed by 'Z'
             # We've been given an 'S' plus NTPv4-formatted bytearr
             # NOTE: this return of size 9 bytes rather than 8 is not
             # properly documented in the SDK guide
-            (char, seconds, subseconds) = unpack('<cII', bytearr)
-            print(
-                f'Above response is: NTP of {seconds} seconds and '
-                f'{subseconds} subseconds'
-            )
-            if char == b'S':
+            (seconds, subseconds, char) = unpack('IIc', bytearr)
+            if char == b'Z':
+                # Amp
+                print(
+                    f'Above response is: NTP of {seconds} seconds and '
+                    f'{subseconds} subseconds'
+                )
                 return seconds + subseconds * 2**-32
             else:
-                raise InvalidECIResponse(bytearr)
+                # Try app (untested)
+                (char, seconds, subseconds) = unpack('cII', bytearr)
+                if char == b'S':
+                    return seconds + subseconds * 2**-32
+                else:
+                    # Just broken
+                    raise InvalidECIResponse(bytearr)
         else:
             raise InvalidECIResponse(bytearr)
     else:
