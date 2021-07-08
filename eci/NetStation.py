@@ -1,17 +1,20 @@
-#!/usr/bin/env python
+#!/us/bin/env python
 # -*- coding: utf-8 -*-
 
-from datetime import timezone, datetime
-from time import time
+import time
+from time import ctime
 from math import floor
 from typing import Union
 
-from ntplib import system_to_ntp_time, ntp_to_system_time
+from ntplib import system_to_ntp_time, ntp_to_system_time, NTPClient
 
 from .eci import build_command, parse_response, allowed_endians, package_event
 from .util import format_time, ntp_epoch, unix_epoch
 from .socket_wrapper import Socket
 from .exceptions import *
+
+cyan = '\u001b[36;1m'
+reset = '\u001b[0m'
 
 
 class NetStation(object):
@@ -92,12 +95,13 @@ class NetStation(object):
                 raise NetStationUnconnected()
         return wrapper
 
-    def connect(self, clock: str = 'ntp') -> None:
+    def connect(self, clock: str = 'ntp', ntp_ip = None) -> None:
         """Connect to the Netstation machine via TCP/IP
 
         Parameters
         ----------
         clock: either 'ntp' or 'simple', indicating clock sync method
+        ntp_ip: the IP address of the NTP server on the amplifier
 
         Raises
         ------
@@ -108,29 +112,39 @@ class NetStation(object):
         """
         if clock not in ('ntp', 'simple'):
             raise NetStationIllegalArgument(clock)
+        if clock == 'ntp' and ntp_ip is None:
+            raise ValueError('NTP sync requires an NTP server IP')
+
         self._socket.connect()
         self._connected = True
         self._command('Query', self._endian)
         self._command('Attention')
+
         if clock == 'ntp':
             # TODO: implement NTP correctly
-            t = (datetime.now(timezone.utc) - unix_epoch).total_seconds()
+            c = NTPClient()
+            response = c.request(ntp_ip, version=3)
+            t = time.time()
+            ntp_t = system_to_ntp_time(t) - response.offset
+            tt = self._command('NTPClockSync', ntp_t)
             print('Sent local time:  ' + format_time(t))
-            t = system_to_ntp_time(t)
-            self._command('NTPClockSync', t)
+            self._syncepoch = t
         elif clock == 'simple':
-            t = (datetime.now() - unix_epoch).total_seconds()
+            t = time.time()
             self._command('ClockSync', t)
+            self._syncepoch = t
 
     @check_connected
     def disconnect(self) -> None:
         """Close the TCP/IP connection."""
+        self._command('Exit')
         self._socket.disconnect()
         self._connected = False
 
     @check_connected
     def begin_rec(self) -> None:
         """Begin Recording"""
+        self._recording_start = time.time()
         self._command('BeginRecording')
 
     @check_connected
@@ -146,18 +160,21 @@ class NetStation(object):
         -------
         The current NTP epoch time
         """
-        t = (datetime.now(timezone.utc) - unix_epoch).total_seconds()
-        data = system_to_ntp_time(t)
-        self._mstime = self._command('NTPReturnClock', data)
+        t = time.time()
+        ntp_t = system_to_ntp_time(t)
+        # amptime = ntp_to_system_time(self._command('NTPReturnClock', t))
+        amptime = ntp_to_system_time(
+            self._command('NTPReturnClock', ntp_t)
+        )
+        self._syncepoch = t
         # TODO: remove this debug info
         print('Sent local time: ' + format_time(t))
-        amptime = ntp_to_system_time(self._mstime)
         print('Received amp time: ' + format_time(amptime))
 
     @check_connected
     def send_event(
         self,
-        start: float,
+        start = 'now',
         duration: float = 0.001,
         event_type: str = ' '*4,
         label: str = ' '*4,
@@ -176,6 +193,15 @@ class NetStation(object):
         """
         # TODO: make sure data sent is valid; implement in eci.eci and
         # reference here
+        if start == 'now':
+            start = time.time() - self._syncepoch
+        elif isinstance(start, float):
+            start = self._recording_start - self._syncepoch + start
+        else:
+            t_start = type(start)
+            return TyepError(
+                f'Start is type {t_start}, should be str "now" or float'
+            )
         data = package_event(
             start, duration, event_type, label, desc, data
         )
@@ -205,6 +231,7 @@ class NetStation(object):
         if not self._connected:
             raise NetStationUnconnected()
         eci_cmd = build_command(cmd, data)
+        print(f'{cyan}Sending command: {eci_cmd}{reset}')
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
 

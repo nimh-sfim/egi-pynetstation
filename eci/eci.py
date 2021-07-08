@@ -3,12 +3,15 @@
 
 """ECI controls and returns"""
 
-from struct import pack
+from struct import pack, unpack
 from typing import Union
+from time import time
 
 from .exceptions import *
-from .util import sys_to_bytes, sys_from_bytes, get_ntp_byte, get_ntp_float
+from .util import sys_from_bytes, get_ntp_byte, get_ntp_float
 
+blue = '\u001b[34;1m'
+reset = '\u001b[0m'
 
 byte_table = {
     "Query": b"Q",
@@ -117,6 +120,7 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
     TypeError if the object passed isn't type bytes
     """
     arrlength = 0
+    print(f'{blue}Received amp response: {bytearr}{reset}')
     if isinstance(bytearr, bytes):
         arrlength = len(bytearr)
         if arrlength == 1:
@@ -126,6 +130,12 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
                 raise ECIFailure()
             if bytearr == b'R':
                 raise ECINoRecordingDeviceFailure()
+            if bytearr == b'\x01':
+                print('NetStation says 1 for no apparent reason')
+                return True
+            if bytearr == b'S':
+                print('NetStation says S')
+                return True
             else:
                 raise InvalidECIResponse(bytearr)
         elif arrlength == 2:
@@ -143,8 +153,13 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             # We've been given an 'S' plus NTPv4-formatted bytearr
             # NOTE: this return of size 9 bytes rather than 8 is not
             # properly documented in the SDK guide
-            if bytearr[0] == INT_VAL_S:
-                return get_ntp_float(bytearr[1:])
+            (char, seconds, subseconds) = unpack('<cII', bytearr)
+            print(
+                f'Above response is: NTP of {seconds} seconds and '
+                f'{subseconds} subseconds'
+            )
+            if char == b'S':
+                return seconds + subseconds * 2**-32
             else:
                 raise InvalidECIResponse(bytearr)
         else:
@@ -165,7 +180,8 @@ def package_event(
 
     Parameters
     ----------
-    start: the start time of the event in SECONDS
+    start: the start time of the event in SECONDS from time of last NTP
+    sync
     duration: the duration of the event in SECONDS
     event_type: a four-character string indicating the event type
     label: a <=256-character string for labeling the event
@@ -183,7 +199,7 @@ def package_event(
 
     # Check data types
     if not (isinstance(start, float) or isinstance(start, int)):
-        raise TypeError(f'Event start should be number, is {type_start}')
+        raise TypeError(f'Event start should be number or str, is {type_start}')
     if not (isinstance(duration, float) or isinstance(duration, int)):
         raise TypeError(
             f'Event duration should be number, is {type_duration}'
@@ -222,9 +238,15 @@ def package_event(
     nkeys = len(data.keys())
 
     # Build block for datagram header
+    start_millis = int(start * MPS)
+    duration_millis = int(duration * MPS)
+    print(
+        f'Using start time of {start_millis} milliseconds'
+        f' and duration of {duration_millis} milliseconds'
+    )
     block = (
-        pack('i', int(start * MPS)) +
-        pack('I', int(duration * MPS)) +
+        pack('i', start_millis) +
+        pack('I', duration_millis) +
         bytes(event_type, 'ascii') +
         pack('B', len_label) + bytes(label, 'ascii') +
         pack('B', len_desc) + bytes(desc, 'ascii') +

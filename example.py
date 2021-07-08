@@ -11,28 +11,30 @@ def main():
 
     if args.mode == 'local':
         IP = '127.0.0.1'
+        IP_amp = '216.239.35.4'
         port = 9885
     elif args.mode == 'amp':
         IP = '10.10.10.42'
+        IP_amp = '10.10.51'
         port = 55513
     else:
         raise RuntimeError('Something strange has occured')
 
     eci_client = NetStation(IP, port)
-    eci_client.connect()
+    eci_client.connect(ntp_ip = IP_amp)
     eci_client.begin_rec()
-    sleep(3)
-    eci_client.send_event(
-        3.0,
-        event_type='text',
-        data={'abcd': 1234},
-    )
+    sleep(2)
     eci_client.resync()
-    sleep(4)
     eci_client.send_event(
-        7.0,
-        event_type='hipm',
-        data={'hola': 'Greetings, Pete!'},
+        event_type = 'hipm',
+        label = 'labl',
+        desc = 'desc',
+        data = {'text': 'mytext'}
+    )
+    eci_client.send_event(
+        start = -1.0,
+        event_type = 'hijt',
+        data = {'monk': 'face'}
     )
     eci_client.end_rec()
     eci_client.disconnect()

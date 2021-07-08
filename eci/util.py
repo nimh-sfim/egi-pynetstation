@@ -41,6 +41,11 @@ def sys_from_bytes(bytearr: bytes, signed: bool = False) -> int:
     -------
     The integer representation of the bytes using system byte order
     """
+    if not isinstance(bytearr, bytes):
+        t_bytearr = type(bytearr)
+        raise TypeError(
+            f'bytearr is type {t_bytearr}, should byte bytes'
+        )
     return int.from_bytes(bytearr, sys.byteorder, signed=signed)
 
 
@@ -109,7 +114,7 @@ def get_ntp_float(bytearr: bytes) -> float:
     if isinstance(bytearr, bytes):
         if len(bytearr) == 8:
             part_1 = bytearr[0:4]
-            part_2 = bytearr[4:]
+            part_2 = 0
             second_portion = sys_from_bytes(part_1)
             subsecond_portion = sys_from_bytes(part_2) * ntp_res
             return second_portion + subsecond_portion
@@ -132,6 +137,8 @@ def format_time(time: float) -> str:
     A string representation of the time in human-readable format
     """
     subseconds, seconds = modf(time)
+    if subseconds < 0:
+        raise ValueError('Something strange has occurred')
     subseconds *= 1e6
     subseconds = int(subseconds)
     fmt = '%Y-%m-%d:%I:%M%:%S'
