@@ -117,24 +117,50 @@ class NetStation(object):
 
         self._socket.connect()
         self._connected = True
+        self._ntp_ip = ntp_ip
         self._command('Query', self._endian)
         self._command('Attention')
 
         if clock == 'ntp':
-            # TODO: implement NTP correctly
-            c = NTPClient()
-            response = c.request(ntp_ip, version=3)
-            t = time.time()
-            ntp_t = system_to_ntp_time(t)
-            self._offset = response.offset
-            tt = self._command('NTPClockSync', ntp_t)
-            print('Sent local time:  ' + format_time(t))
-            print(f'NTP offset is approx {self._offset}')
-            self._syncepoch = t
+            self.ntpsync()
         elif clock == 'simple':
             t = time.time()
             self._command('ClockSync', t)
             self._syncepoch = t
+
+    @check_connected
+    def ntpsync(self):
+        """Perform an NTP synchronization"""
+        self._ntpsynced = True
+        self._command('Attention')
+        if not self._ntp_ip:
+            raise NetStationNoNTPIP()
+        c = NTPClient()
+        response = c.request(self._ntp_ip, version=3)
+        t = time.time()
+        ntp_t = system_to_ntp_time(t)
+        tt = self._command('NTPClockSync', ntp_t)
+        self._offset = response.offset
+        self._syncepoch = t
+        print('Sent local time: ' + format_time(t))
+        print(f'NTP offset is approx {self._offset}')
+
+    @check_connected
+    def resync(self):
+        """Perform a re-synchronization"""
+        if not self._ntp_ip:
+            raise NetStationNoNTPIP()
+        if not self._ntpsynced:
+            self.ntpsync()
+        c = NTPClient()
+        response = c.request(self._ntp_ip, version=3)
+        t = time.time()
+        ntp_t = system_to_ntp_time(t)
+        tt = self._command('NTPReturnClock', ntp_t)
+        self._offset = response.offset
+        print('Sent local time: ' + format_time(t))
+        print(f'NTP offset is approx {self._offset}')
+
 
     @check_connected
     def disconnect(self) -> None:
@@ -155,25 +181,6 @@ class NetStation(object):
         self._command('EndRecording')
 
     @check_connected
-    def resync(self) -> float:
-        """Re-synchronize with the amplifier
-
-        Returns
-        -------
-        The current NTP epoch time
-        """
-        t = time.time()
-        ntp_t = system_to_ntp_time(t)
-        # amptime = ntp_to_system_time(self._command('NTPReturnClock', t))
-        amptime = ntp_to_system_time(
-            self._command('NTPReturnClock', ntp_t)
-        )
-        self._syncepoch = t
-        # TODO: remove this debug info
-        print('Sent local time: ' + format_time(t))
-        print('Received amp time: ' + format_time(amptime))
-
-    @check_connected
     def send_event(
         self,
         start = 'now',
@@ -182,6 +189,7 @@ class NetStation(object):
         label: str = ' '*4,
         desc: str = ' '*4,
         data: dict = {},
+        resync: bool = False,
     ) -> None:
         """Send event to amplifier
 
@@ -207,6 +215,8 @@ class NetStation(object):
             return TyepError(
                 f'Start is type {t_start}, should be str "now" or float'
             )
+        if resync:
+            self.resync()
         data = package_event(
             start, duration, event_type, label, desc, data
         )

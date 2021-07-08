@@ -45,6 +45,16 @@ class NetStationIllegalArgument(NetStationError):
         self.message = '%s is an illegal argument' % arg
 
 
+class NetStationNoNTPIP(NetStationError):
+    """Exception for if you attempt to perform NTP sync with no IP"""
+    def __init__(self) -> None:
+        self.message = (
+            'Attempted to perform NTP sync without supplying NTP IP.'
+            'Please review the documentation for NetStation and revise '
+            'your experiment.'
+        )
+
+
 # Invalid ECI commands
 class InvalidECICommand(ECIException):
     """Exception raised for trying to send an invalid ECI command"""

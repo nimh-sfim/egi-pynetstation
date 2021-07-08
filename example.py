@@ -23,19 +23,21 @@ def main():
     eci_client = NetStation(IP, port)
     eci_client.connect(ntp_ip = IP_amp)
     eci_client.begin_rec()
-    sleep(2)
-    eci_client.resync()
     eci_client.send_event(
-        event_type = 'hipm',
-        label = 'labl',
-        desc = 'desc',
-        data = {'text': 'mytext'}
-    )
-    eci_client.send_event(
-        start = -1.0,
+        start = 0.0,
         event_type = 'hijt',
-        data = {'monk': 'face'}
+        data = {'monk': 'face'},
+        resync = True,
     )
+    sleep(1)
+    eci_client.send_event(event_type='t1  ')
+    sleep(1)
+    eci_client.send_event(event_type='t2  ', resync=True)
+    sleep(1)
+    eci_client.send_event(event_type='t3  ')
+    sleep(1)
+    eci_client.send_event(event_type='t4  ', resync=True)
+    sleep(1)
     eci_client.end_rec()
     eci_client.disconnect()
 if __name__ == '__main__':
