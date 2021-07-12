@@ -2,19 +2,21 @@
 # -*- coding: utf-8 -*-
 
 import time
-from time import ctime
+import warnings
 from math import floor
 from typing import Union
 
-from ntplib import system_to_ntp_time, ntp_to_system_time, NTPClient
+from ntplib import system_to_ntp_time, NTPClient
 
-from eci.eci import build_command, parse_response, allowed_endians, package_event
-from eci.util import format_time, ntp_epoch, unix_epoch
+from eci.eci import (
+    build_command, parse_response, allowed_endians, package_event
+)
 from eci.socket_wrapper import Socket
-from eci.exceptions import *
+from eci.exceptions import (
+    NetStationIllegalArgument, NetStationUnconnected, NetStationNoNTPIP
+)
 
-cyan = '\u001b[36;1m'
-reset = '\u001b[0m'
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 class NetStation(object):
@@ -28,18 +30,26 @@ class NetStation(object):
         Whether this NetStation is connected
     _endian: str
         The endianness of this machine
-    _mstime: float
-        Time in milliseconds last retrieved
+    _syncepoch: float
+        The time.time() of the NTP synchronization
+    _ntp_ip: str
+        The IP address of the amplifier for NTP sync
+    _recording: bool
+        Whether the amplifier is recording
+    _recording_start: float
+        The time.time() for when recording began
     """
-    # TODO: implement proper clock sync, update _mstime
     def __init__(self, ipv4: str, port: int, endian: str = 'NTEL') -> None:
         """Constructor for NetStation
 
         Parameters
         ----------
-        ipv4: the ipv4 address to use for the amplifier
-        port: the port number to use for the amplifier
-        endian: the endianness of the machine; see eci.allowed_endians
+        ipv4: str
+            the ipv4 address to use for the amplifier
+        port: int
+            the port number to use for the amplifier
+        endian: str
+            the endianness of the machine; see eci.allowed_endians
 
         Notes
         -----
@@ -57,9 +67,14 @@ class NetStation(object):
           This means that the total size of the server response is actually
           9 bytes rather than 8, and that the response's first byte is 'S'
           rather than 'Z'.
+          However, sometimes the server also responds with 8 bytes followed
+          by 'Z'. It is unclear which circumstances trigger which response.
+          Both cases are currently accounted for.
         - eci_Identify actually responses with 'I' plus the byte
           representation of the identity, for a total of two bytes rather
           than one
+        - The server responds with \x01 in some contexts, but it is unknown
+          why
         The default endianness is determined based on the use of a 2020
         MacBook Pro 13" with i5, on MacOS 10.15.7. Feel free to inform the
         authors of the appropriate endianness for other platforms so that
@@ -74,14 +89,14 @@ class NetStation(object):
         if not (endian in allowed_endians):
             raise NetStationIllegalArgument(endian)
         self._endian = endian
-        self._mstime = None
 
     def check_connected(func) -> None:
         """Decorator to raise exception if not connected
 
         Parameters
         ----------
-        func: a function which has no parameters
+        func: Callable
+            a function which has no parameters
 
         Raises
         ------
@@ -95,7 +110,7 @@ class NetStation(object):
                 raise NetStationUnconnected()
         return wrapper
 
-    def connect(self, clock: str = 'ntp', ntp_ip = None) -> None:
+    def connect(self, clock: str = 'ntp', ntp_ip: str = None) -> None:
         """Connect to the Netstation machine via TCP/IP
 
         Parameters
@@ -144,27 +159,42 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t)
-        tt = self._command('NTPClockSync', ntp_t)
+        self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
 
     @check_connected
     def resync(self):
-        """Perform a re-synchronization"""
+        """Perform a re-synchronization
+
+        Notes
+        -----
+        So far, re-synchronization only appears to reduce timing accuracy
+        instead of improving it. Retained so it can be refined.
+        """
         if self._clock == 'simple':
-            print('Simple clock; no resync')
+            warnings.warn(
+                'Re-synchronization only works for NTP clock mode; '
+                'however, this NetStation instance is using the simple '
+                'clock mode.',
+                UserWarning
+            )
             return None
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
         if not self._ntpsynced:
             self.ntpsync()
+        warnings.warn(
+            'NTP re-synchronization does not appear to increase timing '
+            'accuracy at this time. We do not recommend using this '
+            'feature.'
+        )
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t)
-        tt = self._command('NTPReturnClock', ntp_t)
+        self._command('NTPReturnClock', ntp_t)
         self._offset = response.offset
-
 
     @check_connected
     def disconnect(self) -> None:
@@ -191,7 +221,7 @@ class NetStation(object):
     @check_connected
     def send_event(
         self,
-        start = 'now',
+        start='now',
         duration: float = 0.001,
         event_type: str = ' '*4,
         label: str = ' '*4,
@@ -202,61 +232,78 @@ class NetStation(object):
 
         Parameters
         ----------
-        data: the event data to send
+        start: str in ('now'), float
+            The start time of the event; 'now' pulls a current timestamp,
+            floating point will be interpreted as "seconds since recording
+            start."
+        duration: float, default 0.001 (1 millisecond)
+            The duration of the event in seconds.
+        event_type: str, default '    '
+            A 4-character string indicating the event type
+        label: str, default '    '
+            A <=256-character string indicating the event label
+        desc: str, default '    '
+            A <=256-character string indicating the event description
+        data: dict, default {}
+            The data dictionary to use for the event. The dictionary
+            requires that each key be a 4-character string. The data for
+            each key may be a boolean, float, integer, or string.
+
+        See Also
+        --------
+        eci.package_event, the function which packages the data
 
         Notes
         -----
-        Current does not check that event data is valid!
+        Separate events may not share a timestamp. If two events arrive at
+        the amplifier with simultaneous times, the one received later will
+        have a start time of one additional millisecond. Additionally, the
+        amplifier may drop events or data if events are sent too rapidly.
         """
-        # TODO: make sure data sent is valid; implement in eci.eci and
-        # reference here
         if self._clock == 'ntp':
             if start == 'now':
                 start = time.time() - self._syncepoch + self._offset
             elif isinstance(start, float):
                 start = (
-                    self._recording_start - self._syncepoch + 
+                    self._recording_start - self._syncepoch +
                     start + self._offset
                 )
             else:
                 t_start = type(start)
-                return TyepError(
+                return TypeError(
                     f'Start is type {t_start}, should be str "now" or float'
                 )
-            data = package_event(
-                start, duration, event_type, label, desc, data
-            )
         elif self._clock == 'simple':
             if start == 'now':
-                millis_per_day = 24 * 60 * 60 * 1e3
-                start = int(floor(time.time()) % millis_per_day)
+                start = int(floor(time.time()) % SECONDS_PER_DAY)
                 print(start)
             elif isinstance(start, float):
-                start = self._recording_start + start
-                start = NetStation._ms_time(start) - self._syncepoch
+                # TODO: check at amplifier
+                warnings.warn(
+                    'This feature has not been tested at the amplifier',
+                    UserWarning
+                )
+                time_seconds = self._recording_start + start
+                start = int(floor(time_seconds)) % SECONDS_PER_DAY
             else:
                 t_start = type(start)
-                return TyepError(
+                return TypeError(
                     f'Start is type {t_start}, should be str "now" or float'
                 )
-            duration *= 1e3
-            data = package_event(
-                start, duration, event_type, label, desc, data,
-                convert_millis=False,
-            )
+        data = package_event(
+            start, duration, event_type, label, desc, data
+        )
         self._command('EventData', data)
-
-    def _ms_time(t) -> int:
-        millis_per_day = 1e3 * 60 * 60 * 24
-        return int(round(t % millis_per_day))
 
     def _command(self, cmd: str, data=None) -> Union[bool, float, int]:
         """Send a command to the amplifier
 
         Parameters
         ----------
-        cmd: the command to send
-        data: the data to send with it
+        cmd: str
+            the command to send
+        data: object
+            the data to send with it
 
         Returns
         -------
@@ -277,7 +324,7 @@ class NetStation(object):
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
 
-    def rec_start(self) -> float:
+    def _rec_start(self) -> float:
         """Get recording start time from time.time()
 
         Returns
@@ -286,7 +333,7 @@ class NetStation(object):
         """
         return self._recording_start
 
-    def since_start(self) -> float:
+    def _since_start(self) -> float:
         """Get difference in time since recording start
 
         Returns
@@ -303,4 +350,4 @@ class NetStation(object):
         The amplifer time of last sync in system time
         """
 
-        return ntp_to_system_time(self._mstime)
+        return self._syncepoch

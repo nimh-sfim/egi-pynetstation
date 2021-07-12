@@ -9,19 +9,24 @@ from typing import Union
 from struct import pack
 from time import strftime, localtime
 from datetime import datetime, timezone
-from eci.exceptions import *
+from eci.exceptions import (
+    NTPInvalidByte, NTPInvalidType
+)
 
 ntp_res = 2**-32
 ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
 unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 
 def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder
 
     Parameters
     ----------
-    number: the number to turn into bytes
-    size: the size in bytes to use for the representation
+    number: int
+        the number to turn into bytes
+    size: int
+        the size in bytes to use for the representation
 
     Returns
     -------
@@ -35,7 +40,8 @@ def sys_from_bytes(bytearr: bytes, signed: bool = False) -> int:
 
     Parameters
     ----------
-    bytearr: the byte representation of the integer
+    bytearr: bytes
+        the byte representation of the integer
 
     Returns
     -------
@@ -54,7 +60,8 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
 
     Parameters
     ----------
-    number: the number of seconds in the NTP epoch
+    number: float, int, bytes
+        the number of seconds in the NTP epoch
 
     Returns
     -------
@@ -93,7 +100,8 @@ def get_ntp_float(bytearr: bytes) -> float:
 
     Parameters
     ----------
-    bytearr: the byte array representing the NTPv4 time
+    bytearr: bytes
+        the byte array representing the NTPv4 time
 
     Returns
     -------
@@ -130,7 +138,7 @@ def format_time(time: float) -> str:
     Parameter
     ---------
     time: float
-	Floating representation of a time, from time.time()
+        Floating representation of a time, from time.time()
 
     Returns
     -------
@@ -142,4 +150,4 @@ def format_time(time: float) -> str:
     subseconds *= 1e6
     subseconds = int(subseconds)
     fmt = '%Y-%m-%d:%I:%M%:%S'
-    return strftime(fmt, localtime(time)) +  '.' + str(subseconds)
+    return strftime(fmt, localtime(time)) + '.' + str(subseconds)

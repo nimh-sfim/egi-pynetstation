@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import socket
-from eci.exceptions import *
+from eci.exceptions import SocketIncompleteTransmission
 
 
 class Socket():

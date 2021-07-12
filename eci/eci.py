@@ -5,13 +5,23 @@
 
 from struct import pack, unpack
 from typing import Union
-from time import time
 
-from .exceptions import *
+from .exceptions import (
+    InvalidECICmd,
+    ECINoDataAllowed,
+    ECIDataRequired,
+    ECIIllegalEndian,
+    ECIClockNonInteger,
+    NTPException,
+    ECINTPInvalid,
+    ECIDataNotBytes,
+    ECIUnknownException,
+    ECIFailure,
+    ECINoRecordingDeviceFailure,
+    InvalidECIResponse
+)
 from .util import sys_from_bytes, get_ntp_byte, get_ntp_float, sys_to_bytes
 
-blue = '\u001b[34;1m'
-reset = '\u001b[0m'
 
 byte_table = {
     "Query": b"Q",
@@ -40,14 +50,17 @@ INT_VAL_S = 83
 # compactly named for convenience; milliseconds per second
 MPS = 1000
 
+
 def build_command(cmd: str, data: object = None) -> bytes:
     """
     Builds a byte array for ECI from the provided string and data
 
     Parameters
     ----------
-    cmd: the command to send
-    data: the data associated with the command; may be one of several types
+    cmd: str
+        the command to send
+    data: object
+        the data associated with the command; may be one of several types
 
     Returns
     -------
@@ -106,7 +119,8 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
 
     Parameters
     ----------
-    bytearr: the byte array to parse (should be size 1)
+    bytearr: bytes
+        the byte array to parse (should be size 1)
 
     Returns
     -------
@@ -185,19 +199,24 @@ def package_event(
     label: str,
     desc: str,
     data: dict,
-    convert_millis = True,
 ):
     """Takes event information and creates appropriate byte string
 
     Parameters
     ----------
-    start: the start time of the event in SECONDS from time of last NTP
-    sync
-    duration: the duration of the event in SECONDS
-    event_type: a four-character string indicating the event type
-    label: a <=256-character string for labeling the event
-    desc: a <=256-character string for describing the event
-    data: a dictionary where each value is a string, number, or boolean,
+    start: float
+        the start time of the event in SECONDS from time of last NTP
+        sync
+    duration: float
+        the duration of the event in SECONDS
+    event_type: str
+        a four-character string indicating the event type
+    label: str
+        a <=256-character string for labeling the event
+    desc: str
+        a <=256-character string for describing the event
+    data: dict
+        a dictionary where each value is a string, number, or boolean,
         and each key is a string. Use this to pass data.
     """
     # Get all data types
@@ -210,7 +229,10 @@ def package_event(
 
     # Check data types
     if not (isinstance(start, float) or isinstance(start, int)):
-        raise TypeError(f'Event start should be number or str, is {type_start}')
+        raise TypeError(
+            'Event start should be number or str, '
+            f'is {type_start}'
+        )
     if not (isinstance(duration, float) or isinstance(duration, int)):
         raise TypeError(
             f'Event duration should be number, is {type_duration}'
@@ -249,12 +271,8 @@ def package_event(
     nkeys = len(data.keys())
 
     # Build block for datagram header
-    if convert_millis:
-        start_millis = int(start * MPS)
-        duration_millis = int(duration * MPS)
-    else:
-        start_millis = int(start)
-        duration_millis = int(duration)
+    start_millis = int(start * MPS)
+    duration_millis = int(duration * MPS)
     block = (
         pack('i', start_millis) +
         pack('I', duration_millis) +
@@ -283,7 +301,7 @@ def package_event(
         # Check the value's validity
         if isinstance(value, bool):
             ktype = 'bool'
-            klen = 1 
+            klen = 1
             kdata = pack('?', value)
         elif isinstance(value, float):
             ktype = 'doub'
@@ -316,5 +334,5 @@ def package_event(
     len_all_blocks = len(block) + len(key_block)
 
     datagram = pack('H', len_all_blocks) + block + key_block
-    
+
     return datagram
