@@ -9,7 +9,7 @@ from typing import Union
 from struct import pack
 from time import strftime, localtime
 from datetime import datetime, timezone
-from .exceptions import *
+from eci.exceptions import *
 
 ntp_res = 2**-32
 ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
