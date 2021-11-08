@@ -121,12 +121,6 @@ class NetStation(object):
         self._command('Query', self._endian)
         self._command('Attention')
 
-        if clock == 'ntp':
-            self.ntpsync()
-        elif clock == 'simple':
-            t = floor(time.time() * 1000)
-            self._command('ClockSync', t)
-            self._syncepoch = t
 
     @check_connected
     def ntpsync(self):
@@ -174,6 +168,13 @@ class NetStation(object):
     @check_connected
     def begin_rec(self) -> None:
         """Begin Recording"""
+        if self._ntp_ip:
+            self.ntpsync()
+        elif clock == 'simple':
+            t = floor(time.time() * 1000)
+            self._command('ClockSync', t)
+            self._syncepoch = t
+
         self._recording_start = time.time()
         self._command('BeginRecording')
 
