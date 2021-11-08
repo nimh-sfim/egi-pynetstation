@@ -124,7 +124,7 @@ class NetStation(object):
         if clock == 'ntp':
             self.ntpsync()
         elif clock == 'simple':
-            t = time.time()
+            t = floor(time.time() * 1000)
             self._command('ClockSync', t)
             self._syncepoch = t
 

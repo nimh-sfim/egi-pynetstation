@@ -8,7 +8,7 @@ from typing import Union
 from time import time
 
 from .exceptions import *
-from .util import sys_from_bytes, get_ntp_byte, get_ntp_float
+from .util import sys_from_bytes, get_ntp_byte, get_ntp_float, sys_to_bytes
 
 blue = '\u001b[34;1m'
 reset = '\u001b[0m'
