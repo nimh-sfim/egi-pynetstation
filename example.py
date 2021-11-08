@@ -26,16 +26,21 @@ def main():
     else:
         raise RuntimeError('Something strange has occured')
 
+    t_minus = time()
     eci_client = NetStation(IP, port)
     eci_client.connect(ntp_ip = IP_amp)
     eci_client.begin_rec()
     eci_client.send_event(event_type="STRT", start=0.0)
+    t = time()
+    print(f"t-minus was {t - t_minus}")
     namer = lambda x: 't %2.2d' % x
 
     for i in range(10):
         high_res_sleep(3)
         name = namer(i)
+        t0 = time()
         eci_client.send_event(event_type=name)
+        print(f"{time() - t0} seconds for a data packet")
         if (i % 4) == 0:
             eci_client.resync()
 
