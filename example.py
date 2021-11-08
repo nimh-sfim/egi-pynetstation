@@ -23,17 +23,14 @@ def main():
     eci_client = NetStation(IP, port)
     eci_client.connect(ntp_ip = IP_amp)
     eci_client.begin_rec()
-    sleep(1)
-    eci_client.send_event(event_type='t1  ')
-    eci_client.send_event(event_type='t2  ')
-    eci_client.send_event(event_type='t3  ')
-    eci_client.send_event(event_type='t4  ')
-    eci_client.resync()
-    name = 't %2.2d' % 0
+    eci_client.send_event(event_type="STRT", start=0.0)
+    namer = lambda x: 't %2.2d' % x
     for i in range(10):
-        sleep(.1)
-        name = 't %2.2d' % i
+        sleep(3)
+        print(f"Should be {i * 3} seconds")
+        name = namer(i)
         eci_client.send_event(event_type=name)
+        #eci_client.resync()
     eci_client.end_rec()
     eci_client.disconnect()
 if __name__ == '__main__':

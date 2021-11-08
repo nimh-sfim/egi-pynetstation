@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import time
-from time import ctime
+from time import ctime, sleep
 from math import floor
 from typing import Union
 
@@ -138,12 +138,13 @@ class NetStation(object):
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
-        ntp_t = system_to_ntp_time(t)
+        ntp_t = system_to_ntp_time(t + response.offset)
         tt = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
         print('Sent local time: ' + format_time(t))
         print(f'NTP offset is approx {self._offset}')
+        print(f'Syncepoch is approx {self._syncepoch}')
 
     @check_connected
     def resync(self):
@@ -156,7 +157,7 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t)
-        tt = self._command('NTPReturnClock', ntp_t)
+        tt = self._command('NTPReturnClock', ntp_t + response.offset)
         self._offset = response.offset
         print('Sent local time: ' + format_time(t))
         print(f'NTP offset is approx {self._offset}')
@@ -203,15 +204,13 @@ class NetStation(object):
         # TODO: make sure data sent is valid; implement in eci.eci and
         # reference here
         if start == 'now':
-            start = time.time() - self._syncepoch + self._offset
+            start = time.time() - self._syncepoch
+            print(f"Start in seconds is {start}")
         elif isinstance(start, float):
-            start = (
-                self._recording_start - self._syncepoch + 
-                start + self._offset
-            )
+            start = start
         else:
             t_start = type(start)
-            return TyepError(
+            return TypeError(
                 f'Start is type {t_start}, should be str "now" or float'
             )
         data = package_event(
