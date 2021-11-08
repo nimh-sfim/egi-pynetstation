@@ -36,6 +36,8 @@ def main():
         high_res_sleep(3)
         name = namer(i)
         eci_client.send_event(event_type=name)
+        if (i % 4) == 0:
+            eci_client.resync()
 
     eci_client.end_rec()
     eci_client.disconnect()
