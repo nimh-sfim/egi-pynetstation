@@ -6,20 +6,7 @@
 from struct import pack, unpack
 from typing import Union
 
-from .exceptions import (
-    InvalidECICmd,
-    ECINoDataAllowed,
-    ECIDataRequired,
-    ECIIllegalEndian,
-    ECIClockNonInteger,
-    NTPException,
-    ECINTPInvalid,
-    ECIDataNotBytes,
-    ECIUnknownException,
-    ECIFailure,
-    ECINoRecordingDeviceFailure,
-    InvalidECIResponse
-)
+from .exceptions import *
 from .util import sys_from_bytes, get_ntp_byte, get_ntp_float, sys_to_bytes
 
 

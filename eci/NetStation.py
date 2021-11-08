@@ -3,6 +3,7 @@
 
 import time
 import warnings
+from time import ctime, sleep
 from math import floor
 from typing import Union
 
@@ -137,16 +138,6 @@ class NetStation(object):
         self._command('Query', self._endian)
         self._command('Attention')
 
-        if clock == 'ntp':
-            self.ntpsync()
-        elif clock == 'simple':
-            self.simple_sync()
-
-    @check_connected
-    def simple_sync(self):
-        self._syncepoch = time.time()
-        t = NetStation._ms_time(time.time())
-        self._command('ClockSync', t)
 
     @check_connected
     def ntpsync(self):
@@ -158,10 +149,13 @@ class NetStation(object):
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
-        ntp_t = system_to_ntp_time(t)
-        self._command('NTPClockSync', ntp_t)
+        ntp_t = system_to_ntp_time(t + response.offset)
+        tt = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
+        print('Sent local time: ' + format_time(t))
+        print(f'NTP offset is approx {self._offset}')
+        print(f'Syncepoch is approx {self._syncepoch}')
 
     @check_connected
     def resync(self):
@@ -193,8 +187,12 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t)
-        self._command('NTPReturnClock', ntp_t)
+        tt = self._command('NTPReturnClock', ntp_t + response.offset)
         self._offset = response.offset
+        print('Sent local time: ' + format_time(t))
+        print(f'NTP offset is approx {self._offset}')
+        self.send_event(event_type="RESY")
+
 
     @check_connected
     def disconnect(self) -> None:
@@ -208,6 +206,13 @@ class NetStation(object):
     @check_connected
     def begin_rec(self) -> None:
         """Begin Recording"""
+        if self._ntp_ip:
+            self.ntpsync()
+        elif clock == 'simple':
+            t = floor(time.time() * 1000)
+            self._command('ClockSync', t)
+            self._syncepoch = t
+
         self._recording_start = time.time()
         self._command('BeginRecording')
         self._recording = True
@@ -260,36 +265,17 @@ class NetStation(object):
         have a start time of one additional millisecond. Additionally, the
         amplifier may drop events or data if events are sent too rapidly.
         """
-        if self._clock == 'ntp':
-            if start == 'now':
-                start = time.time() - self._syncepoch + self._offset
-            elif isinstance(start, float):
-                start = (
-                    self._recording_start - self._syncepoch +
-                    start + self._offset
-                )
-            else:
-                t_start = type(start)
-                return TypeError(
-                    f'Start is type {t_start}, should be str "now" or float'
-                )
-        elif self._clock == 'simple':
-            if start == 'now':
-                start = int(floor(time.time()) % SECONDS_PER_DAY)
-                print(start)
-            elif isinstance(start, float):
-                # TODO: check at amplifier
-                warnings.warn(
-                    'This feature has not been tested at the amplifier',
-                    UserWarning
-                )
-                time_seconds = self._recording_start + start
-                start = int(floor(time_seconds)) % SECONDS_PER_DAY
-            else:
-                t_start = type(start)
-                return TypeError(
-                    f'Start is type {t_start}, should be str "now" or float'
-                )
+        # TODO: make sure data sent is valid; implement in eci.eci and
+        # reference here
+        if start == 'now':
+            start = time.time() - self._syncepoch
+        elif isinstance(start, float):
+            start = start
+        else:
+            t_start = type(start)
+            return TypeError(
+                f'Start is type {t_start}, should be str "now" or float'
+            )
         data = package_event(
             start, duration, event_type, label, desc, data
         )
