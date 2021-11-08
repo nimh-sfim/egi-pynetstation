@@ -161,6 +161,7 @@ class NetStation(object):
         self._offset = response.offset
         print('Sent local time: ' + format_time(t))
         print(f'NTP offset is approx {self._offset}')
+        self.send_event(event_type="RESY")
 
 
     @check_connected
