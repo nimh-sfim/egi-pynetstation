@@ -25,12 +25,15 @@ def main():
     eci_client.begin_rec()
     eci_client.send_event(event_type="STRT", start=0.0)
     namer = lambda x: 't %2.2d' % x
+
     for i in range(10):
         sleep(3)
-        print(f"Should be {i * 3} seconds")
+        n_seconds = 3.0 * i
+        print(f"Should be {n_seconds} seconds")
         name = namer(i)
-        eci_client.send_event(event_type=name)
+        eci_client.send_event(event_type=name, start=n_seconds)
         #eci_client.resync()
+
     eci_client.end_rec()
     eci_client.disconnect()
 if __name__ == '__main__':

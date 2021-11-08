@@ -205,7 +205,6 @@ class NetStation(object):
         # reference here
         if start == 'now':
             start = time.time() - self._syncepoch
-            print(f"Start in seconds is {start}")
         elif isinstance(start, float):
             start = start
         else:
