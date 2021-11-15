@@ -203,8 +203,8 @@ def test_invalid_data_types():
 
 def test_check_valid_output():
     block = (
-        pack('l', valid_start_ms) +
-        pack('l', valid_duration_ms) +
+        pack('i', valid_start_ms) +
+        pack('I', valid_duration_ms) +
         bytes(valid_type, 'ascii') +
         pack('B', len(valid_label)) +
         bytes(valid_label, 'ascii') +
@@ -214,11 +214,11 @@ def test_check_valid_output():
     )
     key_block = (
         # bool - True pair
-        bytes('boolbool', 'ascii') + pack('H?', 1, True) +
+        bytes('boolbool', 'ascii') + pack('H', 1) + pack('?', True) +
         # numb - 1.01 pair
-        bytes('numbdoub', 'ascii') + pack('Hd', 1, 1.01) +
+        bytes('numbdoub', 'ascii') + pack('H', 8) + pack('d', 1.01) +
         # uint - 1 pair
-        bytes('uintlong', 'ascii') + pack('Hl', 1, 1) +
+        bytes('uintlong', 'ascii') + pack('H', 4) + pack('i', 1) +
         # text - dog pair
         bytes('textTEXT', 'ascii') + pack('H', 3) + bytes('dog', 'ascii')
     )
