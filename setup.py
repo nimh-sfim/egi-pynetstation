@@ -18,5 +18,11 @@ setuptools.setup(
         'Operating System :: OS Independent',
     ],
     packages=setuptools.find_packages(),
+    extras_require={
+        'dev': [
+            'sphinx',
+            'sphinx_rtd_theme',
+        ]
+    },
     python_requires='>=3.7',
 )
