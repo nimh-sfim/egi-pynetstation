@@ -120,7 +120,8 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
     TypeError if the object passed isn't type bytes
     """
     arrlength = 0
-    print(f'{blue}Received amp response: {bytearr}{reset}')
+    # TODO: turn into a debug option
+    # print(f'{blue}Received amp response: {bytearr}{reset}')
     if isinstance(bytearr, bytes):
         arrlength = len(bytearr)
         if arrlength == 1:
@@ -131,10 +132,12 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             if bytearr == b'R':
                 raise ECINoRecordingDeviceFailure()
             if bytearr == b'\x01':
-                print('NetStation says 1 for no apparent reason')
+                # TODO: turn into a debug option
+                # print('NetStation says 1 for no apparent reason')
                 return True
             if bytearr == b'S':
-                print('NetStation says S')
+                # TODO: turn into a debug option
+                # print('NetStation says S')
                 return True
             else:
                 raise InvalidECIResponse(bytearr)
@@ -161,10 +164,11 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             (seconds, subseconds, char) = unpack('IIc', bytearr)
             if char == b'Z':
                 # Amp
-                print(
-                    f'Above response is: NTP of {seconds} seconds and '
-                    f'{subseconds} subseconds'
-                )
+                # TODO: turn into a debug option
+                # print(
+                #     f'Above response is: NTP of {seconds} seconds and '
+                #     f'{subseconds} subseconds'
+                # )
                 return seconds + subseconds * 2**-32
             else:
                 # Try S start (amp or app)
@@ -257,10 +261,11 @@ def package_event(
     # Build block for datagram header
     start_millis = int(start * MPS)
     duration_millis = int(duration * MPS)
-    print(
-        f'Using start time of {start_millis} milliseconds'
-        f' and duration of {duration_millis} milliseconds'
-    )
+    # TODO: turn into a debug option
+    # print(
+    #     f'Using start time of {start_millis} milliseconds'
+    #     f' and duration of {duration_millis} milliseconds'
+    # )
     block = (
         pack('i', start_millis) +
         pack('I', duration_millis) +

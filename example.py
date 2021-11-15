@@ -32,7 +32,6 @@ def main():
     eci_client.begin_rec()
     eci_client.send_event(event_type="STRT", start=0.0)
     t = time()
-    print(f"t-minus was {t - t_minus}")
     namer = lambda x: 't %2.2d' % x
 
     for i in range(10):
@@ -40,7 +39,6 @@ def main():
         name = namer(i)
         t0 = time()
         eci_client.send_event(event_type=name)
-        print(f"{time() - t0} seconds for a data packet")
         if (i % 4) == 0:
             eci_client.resync()
 
