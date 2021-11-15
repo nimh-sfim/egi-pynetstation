@@ -5,7 +5,7 @@ with open('README.md', 'r', encoding='utf-8') as fh:
 
 setuptools.setup(
     name='eci',
-    version='0.0.1',
+    version='0.0.1a1',
     author='Joshua B. Teves',
     author_email='joshua.teves@nih.gov',
     description='A library for using EGI EEG network interface',
