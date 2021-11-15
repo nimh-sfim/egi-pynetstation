@@ -2,7 +2,7 @@
 *.swp
 
 # RTD build
-docs/build
+docs/_build
 
 # setup
 eci.egg-info/
