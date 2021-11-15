@@ -5,14 +5,13 @@ from struct import pack
 import pytest
 
 from eci.eci import package_event
-from eci.util import sys_to_bytes
 
-valid_start=1.0
-valid_duration=0.001
-valid_type='abcd'
-valid_label='label'
-valid_description='description'
-valid_data={
+valid_start = 1.0
+valid_duration = 0.001
+valid_type = 'abcd'
+valid_label = 'label'
+valid_description = 'description'
+valid_data = {
     'bool': True,
     'numb': 1.01,
     'uint': 1,
@@ -21,6 +20,7 @@ valid_data={
 
 valid_start_ms = 1000
 valid_duration_ms = 1
+
 
 # Exception Testing
 def test_invalid_start_type():
@@ -47,6 +47,7 @@ def test_invalid_start_type():
         )
     assert 'Event start should be >= 0, is ' in str(e.value)
 
+
 def test_invalid_duration_type():
     """Ensure non-float duration or duration <1ms triggers error"""
     with pytest.raises(TypeError) as e:
@@ -59,7 +60,7 @@ def test_invalid_duration_type():
             valid_data
         )
     assert 'Event duration should be number' in str(e.value)
-    
+
     with pytest.raises(TypeError) as e:
         package_event(
             valid_start,
@@ -95,6 +96,7 @@ def test_invalid_type_type():
         )
     assert 'Event type should have 4 characters' in str(e.value)
 
+
 def test_invalid_label_type():
     with pytest.raises(TypeError) as e:
         package_event(
@@ -112,7 +114,7 @@ def test_invalid_label_type():
             valid_start,
             valid_duration,
             valid_type,
-            ' '*257,
+            ' ' * 257,
             valid_description,
             valid_data
         )
@@ -137,7 +139,7 @@ def test_invalid_description_type():
             valid_duration,
             valid_type,
             valid_label,
-            ' '*257,
+            ' ' * 257,
             valid_data
         )
     assert 'Event description should be <= 256 characters' in str(e.value)

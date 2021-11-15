@@ -6,15 +6,16 @@ import pytest
 from eci.exceptions import *
 from eci.util import sys_to_bytes, get_ntp_byte
 
+
 # Exception Testing
 def test_raises_for_invalid_NTP():
     with pytest.raises(NTPInvalidByte):
-        test = get_ntp_byte(sys_to_bytes(2, 5))
+        _ = get_ntp_byte(sys_to_bytes(2, 5))
 
 
 def test_raises_for_nonbyte_data():
     with pytest.raises(NTPInvalidType):
-        test = get_ntp_byte('cat')
+        _ = get_ntp_byte('cat')
 
 
 # Correct functioning testing

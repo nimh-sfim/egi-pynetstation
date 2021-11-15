@@ -11,46 +11,47 @@ valid_number = sys_to_bytes(56, 1)
 correct_ntp = 1 + 2**-32
 valid_ntp = get_ntp_byte(correct_ntp)
 
+
 # Exception Testing
 def test_parse_failure():
     with pytest.raises(ECIFailure):
-        test = parse_response(b'F')
+        _ = parse_response(b'F')
 
 
 def test_parse_no_recording():
     with pytest.raises(ECINoRecordingDeviceFailure):
-        test = parse_response(b'R')
+        _ = parse_response(b'R')
 
 
 def test_parse_singleton():
     with pytest.raises(InvalidECIResponse):
-        test = parse_response(b'D')
+        _ = parse_response(b'D')
 
 
 def test_parse_invalid_type():
-    with pytest.raises(InvalidECIResponse) as e:
-        test = parse_response('cat')
+    with pytest.raises(InvalidECIResponse):
+        _ = parse_response('cat')
 
 
 def test_parse_illegal_ident():
-    with pytest.raises(InvalidECIResponse) as e:
-        test = parse_response(invalid_id + valid_number)
+    with pytest.raises(InvalidECIResponse):
+        _ = parse_response(invalid_id + valid_number)
 
 
 def test_parse_illegal_ident_ntp():
-    with pytest.raises(InvalidECIResponse) as e:
-        test = parse_response(invalid_id + valid_ntp)
+    with pytest.raises(InvalidECIResponse):
+        _ = parse_response(invalid_id + valid_ntp)
 
 
 def test_parse_invalid_size():
-    with pytest.raises(InvalidECIResponse) as e:
-        test = parse_response(sys_to_bytes(0, 5))
+    with pytest.raises(InvalidECIResponse):
+        _ = parse_response(sys_to_bytes(0, 5))
 
 
 # Functionality Checks
 def test_parse_gets_success():
     test = parse_response(b'Z')
-    assert test == True
+    assert test is True
 
 
 def test_parse_gets_version():

@@ -4,14 +4,12 @@
 """Abstraction of the NetStation SDK as an object"""
 
 import time
-from time import ctime, sleep
 from math import floor
 from typing import Union
 
-from ntplib import system_to_ntp_time, ntp_to_system_time, NTPClient
+from ntplib import system_to_ntp_time, NTPClient
 
 from .eci import build_command, parse_response, allowed_endians, package_event
-from .util import format_time, ntp_epoch, unix_epoch
 from .socket_wrapper import Socket
 from .exceptions import *
 
@@ -106,7 +104,7 @@ class NetStation(object):
                 raise NetStationUnconnected()
         return wrapper
 
-    def connect(self, clock: str = 'ntp', ntp_ip = None) -> None:
+    def connect(self, clock: str = 'ntp', ntp_ip: str = None) -> None:
         """Connect to the Netstation machine via TCP/IP
 
         Parameters
@@ -143,7 +141,6 @@ class NetStation(object):
         self._command('Query', self._endian)
         self._command('Attention')
 
-
     @check_connected
     def ntpsync(self):
         """Perform an NTP synchronization"""
@@ -155,13 +152,13 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t + response.offset)
-        tt = self._command('NTPClockSync', ntp_t)
+        _ = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
         # TODO: Turn into a debug option
-        #print('Sent local time: ' + format_time(t))
-        #print(f'NTP offset is approx {self._offset}')
-        #print(f'Syncepoch is approx {self._syncepoch}')
+        # print('Sent local time: ' + format_time(t))
+        # print(f'NTP offset is approx {self._offset}')
+        # print(f'Syncepoch is approx {self._syncepoch}')
 
     @check_connected
     def resync(self):
@@ -174,13 +171,12 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t)
-        tt = self._command('NTPReturnClock', ntp_t + response.offset)
+        _ = self._command('NTPReturnClock', ntp_t + response.offset)
         self._offset = response.offset
         # TODO: Turn into a debug option
-        #print('Sent local time: ' + format_time(t))
-        #print(f'NTP offset is approx {self._offset}')
+        # print('Sent local time: ' + format_time(t))
+        # print(f'NTP offset is approx {self._offset}')
         self.send_event(event_type="RESY")
-
 
     @check_connected
     def disconnect(self) -> None:
@@ -212,11 +208,11 @@ class NetStation(object):
     @check_connected
     def send_event(
         self,
-        start = 'now',
+        start='now',
         duration: float = 0.001,
-        event_type: str = ' '*4,
-        label: str = ' '*4,
-        desc: str = ' '*4,
+        event_type: str = ' ' * 4,
+        label: str = ' ' * 4,
+        desc: str = ' ' * 4,
         data: dict = {},
     ) -> None:
         """Send event to amplifier
@@ -326,6 +322,6 @@ class NetStation(object):
             raise NetStationUnconnected()
         eci_cmd = build_command(cmd, data)
         # TODO: turn into a debug option
-        #print(f'{cyan}Sending command: {eci_cmd}{reset}')
+        # print(f'{cyan}Sending command: {eci_cmd}{reset}')
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
