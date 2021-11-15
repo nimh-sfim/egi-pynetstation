@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""ECI controls and returns"""
+"""ECI controls and returns; mostly for internal use"""
 
 from struct import pack, unpack
 from typing import Union
@@ -10,9 +10,11 @@ from time import time
 from .exceptions import *
 from .util import sys_from_bytes, get_ntp_byte, get_ntp_float, sys_to_bytes
 
+# Color codes for printing debug information
 blue = '\u001b[34;1m'
 reset = '\u001b[0m'
 
+# Variable to map API documentation to the byte representation
 byte_table = {
     "Query": b"Q",
     "NewQuery": b"Y",
@@ -34,6 +36,7 @@ requires_data = ("Query", "ClockSync", "NTPClockSync", "EventData",
 allowed_endians = ("NTEL", "MAC-", "UNIX")
 
 # Python converts the bytes to ints when indexing; this is more legible
+# This is admittedly hacky but it works.
 INT_VAL_I = 73
 INT_VAL_S = 83
 
@@ -61,20 +64,24 @@ def build_command(cmd: str, data: object = None) -> bytes:
     --------
     InvalidECICommand and subclasses in eci.exceptions.py
     """
-    # the byte array to send
-    tx = None
-    # begin validating
     if cmd not in byte_table:
         raise InvalidECICmd(cmd)
+    # the byte array to send
     tx = byte_table[cmd]
+    # Inverted if to normal use to reduce indentation for most of function
     if cmd not in requires_data:
         if data is not None:
+            # We were given data but can't use it
             raise ECINoDataAllowed(cmd, data)
         else:
+            # We're done, simple command
             return tx
     if data is None:
+        # We need data and don't have it
         raise ECIDataRequired(cmd)
-    # iterate to validate individual command data requirements:
+    # From here forward, we assume that we have data to work with
+    # There is a series of conditionals to determine whether the supplied
+    # data is valid.
     if cmd == "Query":
         if data in allowed_endians:
             tx += data.encode("ASCII")
@@ -90,8 +97,9 @@ def build_command(cmd: str, data: object = None) -> bytes:
             tx += get_ntp_byte(data)
         except NTPException:
             raise ECINTPInvalid()
+    # TODO: add package_event to the command builder so that it is all
+    # validated automatically
     elif cmd == "EventData":
-        # TODO: make sure datagram is valid or construct helper
         if isinstance(data, bytes):
             tx += data
         else:
@@ -106,7 +114,7 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
 
     Parameters
     ----------
-    bytearr: the byte array to parse (should be size 1)
+    bytearr: the byte array to parse
 
     Returns
     -------
@@ -118,6 +126,12 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
     ECIFailure if the amp responds with failure
     ECINoRecordingDeviceFailure if the failure is a result of no recording
     TypeError if the object passed isn't type bytes
+
+    Notes
+    -----
+    The documentation on how the server should respond is somewhat sketchy.
+    These validations were determined mostly through trial and error.
+    To view deviations from documentation, please view the source code.
     """
     arrlength = 0
     # TODO: turn into a debug option
@@ -133,7 +147,7 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
                 raise ECINoRecordingDeviceFailure()
             if bytearr == b'\x01':
                 # TODO: turn into a debug option
-                # print('NetStation says 1 for no apparent reason')
+                # print('NetStation says 1')
                 return True
             if bytearr == b'S':
                 # TODO: turn into a debug option
@@ -153,14 +167,12 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             # We've been given an NTPv4-formatted bytearr
             return get_ntp_float(bytearr)
         elif arrlength == 9:
-            # ADMONITION: app and amp behavior diverge incompatibly
-            # The APP will put 'S' followed by the NTP bytes
-            # The AMP will put NTP bytes followed by 'Z'
-            # However, sometimes the amp will ALSO respond with S at the
-            # beginning.
-            # We've been given an 'S' plus NTPv4-formatted bytearr
+            # We got back an NTP timestamp or failed
+
             # NOTE: this return of size 9 bytes rather than 8 is not
-            # properly documented in the SDK guide
+            # properly documented in the SDK guide. Sometimes the amp
+            # responds with "S" and other times "Z". The reason for this
+            # behavior is unclear.
             (seconds, subseconds, char) = unpack('IIc', bytearr)
             if char == b'Z':
                 # Amp
@@ -181,7 +193,6 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
                 if char == INT_VAL_S:
                     return seconds + subseconds * 2**-32
                 else:
-                    # Just broken
                     raise InvalidECIResponse(bytearr)
         else:
             raise InvalidECIResponse(bytearr)
@@ -210,7 +221,7 @@ def package_event(
     data: a dictionary where each value is a string, number, or boolean,
         and each key is a string. Use this to pass data.
     """
-    # Get all data types
+    # First, perform type-checking and top-level validation
     type_start = type(start)
     type_duration = type(duration)
     type_etype = type(event_type)
@@ -218,7 +229,6 @@ def package_event(
     type_desc = type(desc)
     type_data = type(data)
 
-    # Check data types
     if not (isinstance(start, float) or isinstance(start, int)):
         raise TypeError(
             f'Event start should be number or str, is {type_start}'
@@ -260,6 +270,7 @@ def package_event(
     if not isinstance(data, dict):
         raise TypeError(f'Event data should be dict, is {type_data}')
 
+    # Begin creating the data block
     nkeys = len(data.keys())
 
     # Build block for datagram header

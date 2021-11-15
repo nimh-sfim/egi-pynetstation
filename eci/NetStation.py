@@ -1,6 +1,8 @@
 #!/us/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Abstraction of the NetStation SDK as an object"""
+
 import time
 from time import ctime, sleep
 from math import floor
@@ -25,13 +27,44 @@ class NetStation(object):
     _socket : Socket
         The socket to use to control the amplifier
     _connected: bool
-        Whether this NetStation is connected
+        Whether this instance is connected
     _endian: str
         The endianness of this machine
     _mstime: float
-        Time in milliseconds last retrieved
+        Time in milliseconds last retrieved; NOT IMPLEMENTED CORRECTLY
+    _ntp_ip: str
+        The IP address of the NTP server on the amplifier
+
+    Notes
+    -----
+    ADMONITION: currently non-NTP clock is not implemented; failing to
+    supply an NTP IP address during connection will result in an error at
+    runtime.
+
+    Some behavior is not properly documented in the SDK guide. You may
+    need to refer to docstrings, code comments, and the README in order
+    to get the complete specification for NetStation behavior rather
+    than the SDK guide. Notable deviations:
+    - eci_NTPReturnClock *requires* an NTPv4 timecode, even though in
+      the documentation "Experimental Control Interface (ECI) Commands
+      and Return Values" table, "Follows controller command if more
+      data expected" column is blank (page 8).
+    - eci_NTPReturnClock returns a byte representing 'S', followed by
+      the 8-byte NTPv4 timecode, rather than the NTPv4 timecode as
+      described in the above table's "ECI Return Values" sub-table.
+      This means that the total size of the server response is actually
+      9 bytes rather than 8, and that the response's first byte is 'S'
+      rather than 'Z'.
+    - eci_Identify actually responses with 'I' plus the byte
+      representation of the identity, for a total of two bytes rather
+      than one
+
+    The default endianness is determined based on the use of a 2020
+    MacBook Pro 13" with i5, on MacOS 10.15.7. Feel free to inform the
+    authors of the appropriate endianness for other platforms so that
+    we can add that to the documentation!
     """
-    # TODO: implement proper clock sync, update _mstime
+    # TODO: implement simple clock using _mstime
     def __init__(self, ipv4: str, port: int, endian: str = 'NTEL') -> None:
         """Constructor for NetStation
 
@@ -41,29 +74,6 @@ class NetStation(object):
         port: the port number to use for the amplifier
         endian: the endianness of the machine; see eci.allowed_endians
 
-        Notes
-        -----
-        Some behavior is not properly documented in the SDK guide. You may
-        need to refer to docstrings, code comments, and the README in order
-        to get the complete specification for NetStation behavior rather
-        than the SDK guide. Notable deviations:
-        - eci_NTPReturnClock *requires* an NTPv4 timecode, even though in
-          the documentation "Experimental Control Interface (ECI) Commands
-          and Return Values" table, "Follows controller command if more
-          data expected" column is blank (page 8).
-        - eci_NTPReturnClock returns a byte representing 'S', followed by
-          the 8-byte NTPv4 timecode, rather than the NTPv4 timecode as
-          described in the above table's "ECI Return Values" sub-table.
-          This means that the total size of the server response is actually
-          9 bytes rather than 8, and that the response's first byte is 'S'
-          rather than 'Z'.
-        - eci_Identify actually responses with 'I' plus the byte
-          representation of the identity, for a total of two bytes rather
-          than one
-        The default endianness is determined based on the use of a 2020
-        MacBook Pro 13" with i5, on MacOS 10.15.7. Feel free to inform the
-        authors of the appropriate endianness for other platforms so that
-        we can add that to the documentation!
 
         See Also
         --------
@@ -75,6 +85,7 @@ class NetStation(object):
             raise NetStationIllegalArgument(endian)
         self._endian = endian
         self._mstime = None
+        self._recording_start = None
 
     def check_connected(func) -> None:
         """Decorator to raise exception if not connected
@@ -109,11 +120,22 @@ class NetStation(object):
             If clock is not 'ntp' or 'simple'
         ConnectionRefusedError
             If the server is not listening
+        RuntimeError
+            If you are a poor soul trying to use the simple clock
         """
         if clock not in ('ntp', 'simple'):
             raise NetStationIllegalArgument(clock)
         if clock == 'ntp' and ntp_ip is None:
             raise ValueError('NTP sync requires an NTP server IP')
+        if clock == 'simple':
+            raise RuntimeError(
+                'You have requested the simple clock. '
+                'We are perplexed by this choice when NTP is an option. '
+                'Nonetheless, the real problem is that the author has not '
+                'had time to implement simple clock as of this release. '
+                'Stay tuned for more information, and sorry for the '
+                'inconvenience.'
+            )
 
         self._socket.connect()
         self._connected = True
@@ -143,7 +165,7 @@ class NetStation(object):
 
     @check_connected
     def resync(self):
-        """Perform a re-synchronization"""
+        """Perform a re-synchronization: NOT RECOMMENDED; INCLUDED FOR COMPLETENESS"""
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
         if not self._ntpsynced:
@@ -169,9 +191,10 @@ class NetStation(object):
 
     @check_connected
     def begin_rec(self) -> None:
-        """Begin Recording"""
+        """Begin Recording; also performs NTP sync"""
         if self._ntp_ip:
             self.ntpsync()
+        # TODO: verify simple clock works correctly
         elif clock == 'simple':
             t = floor(time.time() * 1000)
             self._command('ClockSync', t)
@@ -184,6 +207,7 @@ class NetStation(object):
     def end_rec(self) -> None:
         """End Recording"""
         self._command('EndRecording')
+        self._recording_start = None
 
     @check_connected
     def send_event(
@@ -199,14 +223,48 @@ class NetStation(object):
 
         Parameters
         ----------
-        data: the event data to send
+        start: str, float, int
+            The start time for the event; if string, use "now" only.
+            Otherwise state the amount of time since recording in seconds.
+            Default "now".
+        duration: float
+            The duration of the event in seconds; default 0.001
+        event_type: str
+            The event type to use; must be 4 characters exactly. Default "     "
+        label: str
+            The label to use; must be <= 256 characters . Default "    "
+        desc: str
+            The description to use; must be <= 256 characters. Default "    "
+        data: dict
+            The event data to send; see Notes for more information.
 
         Notes
         -----
-        Current does not check that event data is valid!
+        When using the event sender, "now" is typically very precise.
+        Tests on a Windows 7 machine with PsychoPy indicate that the
+        latency in real time is about 54 +/- 3 ms for a short experiment.
+        More data to come; stay tuned.
+
+        It is not necessary to send any data; in fact, this is recommended
+        as it takes some (admittedly small) amount of time to package the
+        data.
+        It is recommended to very clearly document what each event marker
+        means and use "event_type" as the main identifier by convention.
+
+        The data to send has several restrictions, enumerated below:
+        - The key values must be precisely 4 ASCII characters in length.
+        - Data must be one of several types:
+          - boolean
+          - floating-point (will be double-precision)
+          - integer (will be "long" precision)
+          - string (ASCII characters only)
+        - The dictionary representing the data must be shallow; no nested
+          dictionaries.
+
+        See Also
+        --------
+        eci.eci for explanations of the internals of the packaging
         """
-        # TODO: make sure data sent is valid; implement in eci.eci and
-        # reference here
         if start == 'now':
             start = time.time() - self._syncepoch
         elif isinstance(start, float):
@@ -221,8 +279,30 @@ class NetStation(object):
         )
         self._command('EventData', data)
 
+    def rec_start(self) -> float:
+        """Get recording start time from time.time()
+
+        Returns
+        -------
+        Floating-point time of recording start
+        """
+        return self._recording_start
+
+    def since_start(self) -> float:
+        """DO NOT USE; Get difference in time since recording start
+
+        Returns
+        -------
+        The number of seconds since recording start
+        """
+        if self._recording_start is not None:
+            return time.time() - self._recording_start
+        else:
+            return None
+
     def _command(self, cmd: str, data=None) -> Union[bool, float, int]:
-        """Send a command to the amplifier
+        """Send a command to the amplifier; please do not use as this is
+        internal.
 
         Parameters
         ----------
@@ -249,31 +329,3 @@ class NetStation(object):
         #print(f'{cyan}Sending command: {eci_cmd}{reset}')
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
-
-    def rec_start(self) -> float:
-        """Get recording start time from time.time()
-
-        Returns
-        -------
-        Floating-point time of recording start
-        """
-        return self._recording_start
-
-    def since_start(self) -> float:
-        """Get difference in time since recording start
-
-        Returns
-        -------
-        The number of seconds since recording start
-        """
-        return time.time() - self._recording_start
-
-    def _last_sync(self) -> float:
-        """Get last sync time in NTP epoch
-
-        Returns
-        -------
-        The amplifer time of last sync in system time
-        """
-
-        return ntp_to_system_time(self._mstime)
