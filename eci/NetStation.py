@@ -136,9 +136,10 @@ class NetStation(object):
         tt = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
-        print('Sent local time: ' + format_time(t))
-        print(f'NTP offset is approx {self._offset}')
-        print(f'Syncepoch is approx {self._syncepoch}')
+        # TODO: Turn into a debug option
+        #print('Sent local time: ' + format_time(t))
+        #print(f'NTP offset is approx {self._offset}')
+        #print(f'Syncepoch is approx {self._syncepoch}')
 
     @check_connected
     def resync(self):
@@ -153,8 +154,9 @@ class NetStation(object):
         ntp_t = system_to_ntp_time(t)
         tt = self._command('NTPReturnClock', ntp_t + response.offset)
         self._offset = response.offset
-        print('Sent local time: ' + format_time(t))
-        print(f'NTP offset is approx {self._offset}')
+        # TODO: Turn into a debug option
+        #print('Sent local time: ' + format_time(t))
+        #print(f'NTP offset is approx {self._offset}')
         self.send_event(event_type="RESY")
 
 
@@ -243,7 +245,8 @@ class NetStation(object):
         if not self._connected:
             raise NetStationUnconnected()
         eci_cmd = build_command(cmd, data)
-        print(f'{cyan}Sending command: {eci_cmd}{reset}')
+        # TODO: turn into a debug option
+        #print(f'{cyan}Sending command: {eci_cmd}{reset}')
         self._socket.write(eci_cmd)
         return parse_response(self._socket.read())
 
