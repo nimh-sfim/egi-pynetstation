@@ -1,6 +1,9 @@
 # vim swap-files
 *.swp
 
+# RTD build
+docs/build
+
 # setup
 eci.egg-info/
 

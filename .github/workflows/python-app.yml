@@ -33,7 +33,7 @@ jobs:
         # - F403: import *
         # - F405: import *
         # - W504: whitespace after binary operator (I prefer having the whitespace)
-        flake8 . --count --exit-zero --statistics --ignore=F403,F405,W504 --max-line-length=120
+        flake8 eci --count --exit-zero --statistics --ignore=F403,F405,W504 --max-line-length=120
     - name: Test with pytest
       run: |
         pytest
