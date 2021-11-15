@@ -20,8 +20,9 @@ def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
 
     Parameters
     ----------
-    number: the number to turn into bytes
+    number: the integer to turn into bytes
     size: the size in bytes to use for the representation
+    signed: whether the integer should be signed
 
     Returns
     -------
@@ -36,6 +37,7 @@ def sys_from_bytes(bytearr: bytes, signed: bool = False) -> int:
     Parameters
     ----------
     bytearr: the byte representation of the integer
+    signed: whether the integer to read is signed
 
     Returns
     -------
@@ -50,7 +52,7 @@ def sys_from_bytes(bytearr: bytes, signed: bool = False) -> int:
 
 
 def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
-    """Converts numbers or bytes into an NTP format
+    """Converts numbers or bytes into an NTP format.
 
     Parameters
     ----------
@@ -66,6 +68,10 @@ def get_ntp_byte(number: Union[float, int, bytes]) -> bytes:
     NTPInvalidType for passing a value that is not a number or byte array
     NTPInvalidByte if the byte array is not of length 8
     OverflowError if the number of seconds cannot be represented
+
+    Notes
+    -----
+    Tested for little-endian only.
     """
     second_portion = 0
     subsecond_portion = 0

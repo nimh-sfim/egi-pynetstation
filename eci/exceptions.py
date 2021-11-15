@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 class SocketException(Exception):
+    """Base class for Socket exceptions"""
     pass
 
 
@@ -14,6 +15,7 @@ class SocketIncompleteTransmission(Exception):
 
 
 class ECIException(Exception):
+    """Base class for ECI exceptions"""
     pass
 
 
@@ -30,6 +32,7 @@ class ECIUnknownException(ECIException):
 
 # Netstation Errors
 class NetStationError(ECIException):
+    """Base class for NetStation exceptions"""
     pass
 
 
@@ -70,25 +73,25 @@ class InvalidECICmd(InvalidECICommand):
 class ECINoDataAllowed(InvalidECICommand):
     """Exception for passing data when not allowed"""
     def __init__(self, cmd: str, data: object) -> None:
-        self.message = 'Command %s does not take data: %s' % (cmd, data)
+        self.message = f'Command {cmd} does not take data: {data}'
 
 
 class ECIDataRequired(InvalidECICommand):
     """Exception for not passing data when required"""
     def __init__(self, cmd: str) -> None:
-        self.message = 'Command %s requires an argument' % cmd
+        self.message = f'Command {cmd} requires an argument'
 
 
 class ECIIllegalEndian(InvalidECICommand):
     """Exception for passing illegal endian type"""
     def __init__(self, endian: str) -> None:
-        self.message = '%s is not a valid endian' % endian
+        self.message = f'{endian} is not a valid endian'
 
 
 class ECIClockNonInteger(InvalidECICommand):
     """Exception for passing non-integer for clock synchronization"""
     def __init__(self, noninteger: object) -> None:
-        self.message = '%s is not a valid integer' % noninteger
+        self.message = f'{noninteger} is not a valid integer'
 
 
 class ECINTPInvalid(InvalidECICommand):
@@ -100,7 +103,7 @@ class ECIDataNotBytes(InvalidECICommand):
     """Exception for non-bytes type for sending data"""
     def __init__(self, o: object) -> None:
         t = type(o)
-        self.message = 'Event Data requires type bytes, is type %s' % t
+        self.message = f'Event Data requires type bytes, is type {t}'
 
 
 # Amp Failure exceptions
@@ -126,9 +129,9 @@ class InvalidECIResponse(ECIResponseFailure):
     def __init__(self, o: object) -> None:
         # TODO: add more specificity with sub-exceptions
         if isinstance(o, bytes):
-            self.message = 'Invalid ECI response length: %s' % o
+            self.message = f'Invalid ECI response length: {o}'
         else:
-            self.message = 'Invalid ECI response type: %s' % type(o)
+            self.message = f'Invalid ECI response type: {type(o)}'
 
 
 # NTP exceptions
@@ -140,10 +143,10 @@ class NTPException(ECIException):
 class NTPInvalidByte(NTPException):
     """Exception for passing an invalid NTP byte array"""
     def __init__(self, bytearr: bytes) -> None:
-        self.message = '%d bytes given instead of 8' % len(bytearr)
+        self.message = f'{len(bytearr)} bytes given instead of 8'
 
 
 class NTPInvalidType(NTPException):
     """Exception for invalid type for NTP time formatting"""
     def __init__(self, o: object) -> None:
-        self.message = 'Type %s is not valid for NTP sync' % type(o)
+        self.message = f'Type {type(o)} is not valid for NTP sync'
