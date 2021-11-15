@@ -1,14 +1,19 @@
 from eci.NetStation import NetStation
-from eci.eci import package_event
-from time import sleep, time
+from time import time
 
 from argparse import ArgumentParser
+
 
 def high_res_sleep(amount: float):
     """Uses repeated time interrogations to try and sleep precisely"""
     t0 = time()
     while (time() - t0) < amount:
         continue
+
+
+def namer(x: int) -> str:
+    return 't %2.2d' % x
+
 
 def main():
     p = ArgumentParser(description="Demonstrate NetStation Interface")
@@ -26,23 +31,21 @@ def main():
     else:
         raise RuntimeError('Something strange has occured')
 
-    t_minus = time()
     eci_client = NetStation(IP, port)
-    eci_client.connect(ntp_ip = IP_amp)
+    eci_client.connect(ntp_ip=IP_amp)
     eci_client.begin_rec()
     eci_client.send_event(event_type="STRT", start=0.0)
-    t = time()
-    namer = lambda x: 't %2.2d' % x
 
     for i in range(10):
         high_res_sleep(3)
         name = namer(i)
-        t0 = time()
         eci_client.send_event(event_type=name)
         if (i % 4) == 0:
             eci_client.resync()
 
     eci_client.end_rec()
     eci_client.disconnect()
+
+
 if __name__ == '__main__':
     main()

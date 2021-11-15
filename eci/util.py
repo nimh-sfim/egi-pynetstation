@@ -15,6 +15,7 @@ ntp_res = 2**-32
 ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
 unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
+
 def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
     """Simplified to_bytes that always uses sys.byteorder
 
@@ -136,7 +137,7 @@ def format_time(time: float) -> str:
     Parameter
     ---------
     time: float
-	Floating representation of a time, from time.time()
+        Floating representation of a time, from time.time()
 
     Returns
     -------
@@ -148,4 +149,4 @@ def format_time(time: float) -> str:
     subseconds *= 1e6
     subseconds = int(subseconds)
     fmt = '%Y-%m-%d:%I:%M%:%S'
-    return strftime(fmt, localtime(time)) +  '.' + str(subseconds)
+    return strftime(fmt, localtime(time)) + '.' + str(subseconds)

@@ -5,7 +5,6 @@
 
 from struct import pack, unpack
 from typing import Union
-from time import time
 
 from .exceptions import *
 from .util import sys_from_bytes, get_ntp_byte, get_ntp_float, sys_to_bytes
@@ -42,6 +41,7 @@ INT_VAL_S = 83
 
 # compactly named for convenience; milliseconds per second
 MPS = 1000
+
 
 def build_command(cmd: str, data: object = None) -> bytes:
     """
@@ -309,7 +309,7 @@ def package_event(
         # Check the value's validity
         if isinstance(value, bool):
             ktype = 'bool'
-            klen = 1 
+            klen = 1
             kdata = pack('?', value)
         elif isinstance(value, float):
             ktype = 'doub'
@@ -342,5 +342,5 @@ def package_event(
     len_all_blocks = len(block) + len(key_block)
 
     datagram = pack('H', len_all_blocks) + block + key_block
-    
+
     return datagram
