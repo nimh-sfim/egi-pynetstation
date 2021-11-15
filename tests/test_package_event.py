@@ -34,7 +34,7 @@ def test_invalid_start_type():
             valid_description,
             valid_data
         )
-    assert 'Event start should be number, is' in str(e.value)
+    assert 'Event start should be number or str, is' in str(e.value)
 
     with pytest.raises(TypeError) as e:
         package_event(
@@ -45,7 +45,7 @@ def test_invalid_start_type():
             valid_description,
             valid_data
         )
-    assert 'Event start should be positive, is ' in str(e.value)
+    assert 'Event start should be >= 0, is ' in str(e.value)
 
 def test_invalid_duration_type():
     """Ensure non-float duration or duration <1ms triggers error"""

@@ -220,7 +220,11 @@ def package_event(
 
     # Check data types
     if not (isinstance(start, float) or isinstance(start, int)):
-        raise TypeError(f'Event start should be number or str, is {type_start}')
+        raise TypeError(
+            f'Event start should be number or str, is {type_start}'
+        )
+    if not start >= 0:
+        raise TypeError(f'Event start should be >= 0, is {start}')
     if not (isinstance(duration, float) or isinstance(duration, int)):
         raise TypeError(
             f'Event duration should be number, is {type_duration}'
