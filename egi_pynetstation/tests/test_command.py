@@ -3,9 +3,9 @@
 
 import struct
 import pytest
-from eci.exceptions import *
-from eci.eci import build_command
-from eci.util import sys_to_bytes
+from egi_pynetstation.exceptions import *
+from egi_pynetstation.eci import build_command
+from egi_pynetstation.util import sys_to_bytes
 
 
 # Exception Testing

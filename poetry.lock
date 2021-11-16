@@ -1,0 +1,18 @@
+[[package]]
+name = "ntplib"
+version = "0.4.0"
+description = "Python NTP library"
+category = "main"
+optional = false
+python-versions = "*"
+
+[metadata]
+lock-version = "1.1"
+python-versions = "^3.8"
+content-hash = "23314c442af52b17deebf14416ace63a548c0f8470fd1600110c18d86e2e7bd8"
+
+[metadata.files]
+ntplib = [
+    {file = "ntplib-0.4.0-py2.py3-none-any.whl", hash = "sha256:8d27375329ed7ff38755f7b6d4658b28edc147cadf40338a63a0da8133469d60"},
+    {file = "ntplib-0.4.0.tar.gz", hash = "sha256:899d8fb5f8c2555213aea95efca02934c7343df6ace9d7628a5176b176906267"},
+]
