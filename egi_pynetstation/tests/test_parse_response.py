@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import pytest
-from eci.exceptions import *
-from eci.eci import parse_response, INT_VAL_S
-from eci.util import sys_to_bytes, get_ntp_byte
+from egi_pynetstation.exceptions import *
+from egi_pynetstation.eci import parse_response, INT_VAL_S
+from egi_pynetstation.util import sys_to_bytes, get_ntp_byte
 
 invalid_id = sys_to_bytes(0, 1)
 valid_number = sys_to_bytes(56, 1)

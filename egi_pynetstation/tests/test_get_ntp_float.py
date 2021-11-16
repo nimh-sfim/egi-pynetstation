@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import pytest
-from eci.exceptions import *
-from eci.util import sys_to_bytes, get_ntp_float, ntp_res
+from egi_pynetstation.exceptions import *
+from egi_pynetstation.util import sys_to_bytes, get_ntp_float, ntp_res
 
 
 # Exception Testing

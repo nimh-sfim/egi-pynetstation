@@ -4,7 +4,7 @@
 from struct import pack
 import pytest
 
-from eci.eci import package_event
+from egi_pynetstation.eci import package_event
 
 valid_start = 1.0
 valid_duration = 0.001
