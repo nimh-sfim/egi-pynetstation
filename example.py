@@ -1,4 +1,4 @@
-from eci.NetStation import NetStation
+from egi_pynetstation.NetStation import NetStation
 from time import time
 
 from argparse import ArgumentParser
