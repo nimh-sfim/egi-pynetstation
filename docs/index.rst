@@ -50,10 +50,10 @@ You will always need to execute commands in the following order:
 
     from egi_pynetstation import NetStation
     # Set an IP address for the computer running NetStation as an IPv4 string
-    IP_netstation = '10.10.10.42'
+    IP_ns = '10.10.10.42'
     # Set a port that NetStation will be listening to as an integer
     port_ns = 55513
-    ns = NetStation(IP_netstation, port_ns)
+    ns = NetStation(IP_ns, port_ns)
     # Set an NTP clock server (the amplifier) address as an IPv4 string
     IP_amp = '10.10.10.51'
     ns.connect(ntp_ip=IP_amp)
