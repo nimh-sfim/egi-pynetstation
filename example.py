@@ -24,18 +24,23 @@ def main():
     # Amp mode for working with the actual EGI Amplifier
     # If you have the amplifier, you probably want 'amp' mode
     if args.mode == 'local':
-        IP = '127.0.0.1'
-        IP_amp = '216.239.35.4'
-        port = 9885
+        IP_virtual_ns = '127.0.0.1'
+        IP_virtual_amp = '216.239.35.4'
+        port_virtual_ns = 9885
+
+        eci_client = NetStation(IP_virtual_ns, port_virtual_ns)
+        eci_client.connect(ntp_ip=IP_virtual_amp)
     elif args.mode == 'amp':
-        IP = '10.10.10.42' # IP Address of Net Station
+        IP_ns = '10.10.10.42' # IP Address of Net Station
         IP_amp = '10.10.10.51' # IP Address of Amplifier
-        port = 55513 #Port configured for ECI in Net Station
+        port_ns = 55513 #Port configured for ECI in Net Station
+
+        eci_client = NetStation(IP_ns, port_ns)
+        eci_client.connect(ntp_ip=IP_amp)
     else:
         raise RuntimeError('Something strange has occured')
 
-    eci_client = NetStation(IP, port)
-    eci_client.connect(ntp_ip=IP_amp)
+
     eci_client.begin_rec()
     eci_client.send_event(event_type="STRT", start=0.0)
 
