@@ -20,14 +20,17 @@ def main():
     p.add_argument('mode', choices=['local', 'amp'])
     args = p.parse_args()
 
+    # Local mode designed to work with AmpServer Testing Applications
+    # Amp mode for working with the actual EGI Amplifier
+    # If you have the amplifier, you probably want 'amp' mode
     if args.mode == 'local':
         IP = '127.0.0.1'
         IP_amp = '216.239.35.4'
         port = 9885
     elif args.mode == 'amp':
-        IP = '10.10.10.42'
-        IP_amp = '10.10.10.51'
-        port = 55513
+        IP = '10.10.10.42' # IP Address of Net Station
+        IP_amp = '10.10.10.51' # IP Address of Amplifier
+        port = 55513 #Port configured for ECI in Net Station
     else:
         raise RuntimeError('Something strange has occured')
 
