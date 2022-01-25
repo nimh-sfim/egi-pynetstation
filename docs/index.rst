@@ -55,7 +55,7 @@ You will always need to execute commands in the following order:
     port_ns = 55513
     ns = NetStation(IP_netstation, port_ns)
     # Set an NTP clock server (the amplifier) address as an IPv4 string
-    IP_amp = '10.10.51'
+    IP_amp = '10.10.10.51'
     ns.connect(ntp_ip=IP_amp)
     # Do whatever setup for your experiment here...
     # Begin recording
