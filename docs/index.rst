@@ -48,15 +48,15 @@ You will always need to execute commands in the following order:
 
 .. code-block:: python
 
-    from eci import NetStation
-    # Set an IP address for the amplifier as an IPv4 string
-    IP_amp = '10.10.10.42'
-    # Set a port that the amplifier will be listening to as an integer
-    port_amp = 55513
-    ns = NetStation(IP_amp, port_amp)
-    # Set an NTP clock server address as an IPv4 string
-    IP_ntp = '10.10.51'
-    ns.connect(ntp_ip=IP_ntp)
+    from egi_pynetstation import NetStation
+    # Set an IP address for the computer running NetStation as an IPv4 string
+    IP_ns = '10.10.10.42'
+    # Set a port that NetStation will be listening to as an integer
+    port_ns = 55513
+    ns = NetStation(IP_ns, port_ns)
+    # Set an NTP clock server (the amplifier) address as an IPv4 string
+    IP_amp = '10.10.10.51'
+    ns.connect(ntp_ip=IP_amp)
     # Do whatever setup for your experiment here...
     # Begin recording
     ns.begin_rec()
