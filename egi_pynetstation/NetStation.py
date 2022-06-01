@@ -171,12 +171,13 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t)
-        _ = self._command('NTPReturnClock', ntp_t + response.offset)
+        response = self._command('NTPReturnClock', ntp_t + response.offset)
         self._offset = response.offset
+        self.send_event(event_type="RESY")
         # TODO: Turn into a debug option
         # print('Sent local time: ' + format_time(t))
         # print(f'NTP offset is approx {self._offset}')
-        self.send_event(event_type="RESY")
+        # print(f'Response is {response}')
 
     @check_connected
     def disconnect(self) -> None:
