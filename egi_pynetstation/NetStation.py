@@ -11,6 +11,7 @@ from ntplib import system_to_ntp_time, NTPClient
 
 from .eci import build_command, parse_response, allowed_endians, package_event
 from .socket_wrapper import Socket
+from .util import format_time
 from .exceptions import *
 
 cyan = '\u001b[36;1m'
@@ -175,9 +176,9 @@ class NetStation(object):
         self._offset = response.offset
         self.send_event(event_type="RESY")
         # TODO: Turn into a debug option
-        # print('Sent local time: ' + format_time(t))
-        # print(f'NTP offset is approx {self._offset}')
-        # print(f'Response is {response}')
+        print('Sent local time: ' + format_time(t))
+        print(f'NTP offset is approx {self._offset}')
+        print(f'Response is {response} (or {format_time(response)}')
 
     @check_connected
     def disconnect(self) -> None:
