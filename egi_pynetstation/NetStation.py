@@ -153,7 +153,7 @@ class NetStation(object):
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         ntp_t = system_to_ntp_time(t + response.offset)
-        _ = self._command('NTPClockSync', ntp_t)
+        cresponse = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
         # TODO: Turn into a debug option
@@ -163,6 +163,11 @@ class NetStation(object):
 
     @check_connected
     def resync(self):
+        """Ensure clocks are synchronized"""
+        self.ntpsync()
+
+    @check_connected
+    def resync_do_not_use_not_recommended(self):
         """Perform a re-synchronization: NOT RECOMMENDED; INCLUDED FOR COMPLETENESS"""
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
@@ -173,12 +178,11 @@ class NetStation(object):
         t = time.time()
         ntp_t = system_to_ntp_time(t)
         response = self._command('NTPReturnClock', ntp_t + response.offset)
-        self._offset = response.offset
         self.send_event(event_type="RESY")
         # TODO: Turn into a debug option
-        print('Sent local time: ' + format_time(t))
-        print(f'NTP offset is approx {self._offset}')
-        print(f'Response is {response} (or {format_time(response)}')
+        # print('Sent local time: ' + format_time(t))
+        # print(f'NTP offset is approx {self._offset}')
+        # print(f'Response is {response} (or {format_time(response)}')
 
     @check_connected
     def disconnect(self) -> None:
