@@ -35,7 +35,7 @@ following from:
 
 It should be installed into the environment you're currently in.
 
-We are also happy to have partnered with `PsychoPy <https://psychopy.org>``
+We are also happy to have partnered with `PsychoPy <https://psychopy.org>`
 Which now includes egi-pynetstation in the standalone package. The functions
 can be referenced directly from your experiment using code objects.
 
