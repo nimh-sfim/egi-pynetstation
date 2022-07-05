@@ -1,9 +1,11 @@
 [tool.poetry]
 name = "egi_pynetstation"
-version = "0.0.0rc0"
+version = "0.0.0rc1"
 description = "Magstim-EGI EEG amplifier NetStation API"
 authors = ["Joshua Teves <joshua.teves@nih.gov>"]
 license = "MIT"
+homepage = "https://egi-pynetstation.readthedocs.io/en/latest/"
+repository = "https://github.com/nimh-sfim/egi-pynetstation"
 
 [tool.poetry.dependencies]
 python = "^3.8"
