@@ -18,13 +18,13 @@ system to perform high-resolution event marking with a small Python API.
 Installation
 ============
 
-To install this package, you can pull it from pyPI via
+**Option 1**: To install this package, you can pull it from pyPI via
 
 .. code-block:: bash
 
     pip install egi-pynetstation
 
-If you would like the latest version on GitHub, you can execute the
+**Option 2**: If you would like the latest version on GitHub, you can execute the
 following from:
 
 .. code-block:: bash
@@ -34,6 +34,11 @@ following from:
     pip install .
 
 It should be installed into the environment you're currently in.
+
+**Option 3**: We are also happy to have partnered with `PsychoPy <https://psychopy.org>`_, 
+which now includes egi-pynetstation in the standalone package without further
+downloads or steps.
+
 
 Examples
 ========
