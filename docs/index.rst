@@ -53,7 +53,7 @@ You will always need to execute commands in the following order:
 
 .. code-block:: python
 
-    from egi_pynetstation import NetStation
+    from egi_pynetstation.NetStation import NetStation
     # Set an IP address for the computer running NetStation as an IPv4 string
     IP_ns = '10.10.10.42'
     # Set a port that NetStation will be listening to as an integer
