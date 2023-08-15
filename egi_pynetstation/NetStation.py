@@ -100,7 +100,19 @@ class NetStation(object):
         """
         def wrapper(*args, **kwargs):
             if args[0]._connected:
-                func(*args, **kwargs)
+                try:
+                    func(*args, **kwargs)
+                except ConnectionResetError:
+                    raise RuntimeError(
+                        "The server forcibly reset the connection, this "
+                        "means you are likely trying to send too many "
+                        "or excessively large events. "
+                        "Consider modifying your experiment to send fewer."
+                        "If the issue persists please contact the "
+                        "developers with your full experiment and source "
+                        "code here:\n"
+                        "https://github.com/nimh-sfim/egi-pynetstation"
+                    )
             else:
                 raise NetStationUnconnected()
         return wrapper
