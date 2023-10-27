@@ -72,7 +72,7 @@ You will always need to execute commands in the following order:
     my_data = {"dogs": "fido"}
     # Send this data with the event type of "STIM"
     ns.send_event(event_type="STIM", data=my_data)
-    #occasionally good to resync with clock - maybe after each trial
+    # Occasionally good to resync with clock - maybe after each trial
     ns.resync()
     # With the experiment concluded, you can end the recording
     ns.end_rec()
