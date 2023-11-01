@@ -282,7 +282,7 @@ class NetStation(object):
         if start == 'now':
             start = time.time() - self._syncepoch
         elif isinstance(start, float):
-            start = start - self._syncepoch
+            start = start
         else:
             t_start = type(start)
             return TypeError(
