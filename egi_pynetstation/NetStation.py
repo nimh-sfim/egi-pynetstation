@@ -177,7 +177,13 @@ class NetStation(object):
     def resync(self):
         """Ensure clocks are synchronized"""
         self.ntpsync()
-
+    
+    
+    @check_connected
+    def getTime(self):
+        return time.time() - self._syncepoch
+    
+    
     @check_connected
     def resync_do_not_use_not_recommended(self):
         """Perform a re-synchronization: NOT RECOMMENDED; INCLUDED FOR COMPLETENESS"""
