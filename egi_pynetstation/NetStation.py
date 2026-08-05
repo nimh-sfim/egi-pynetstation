@@ -241,7 +241,7 @@ class NetStation(object):
     def getTime(self):
         if self._clock_base_time is None or self._clock_base_local is None:
             raise RuntimeError('getTime is unavailable before NTP sync')
-        return self._clock_base_time + (time.time() - self._clock_base_local)
+        return self._estimated_amp_time_at(time.time())
     
     
     @check_connected
@@ -377,23 +377,33 @@ class NetStation(object):
         received_local: float,
         source: str,
     ) -> None:
+        package_time = None
+        difference = None
+        if self._clock_base_time is not None and self._clock_base_local is not None:
+            package_time = self._estimated_amp_time_at(received_local)
+            difference = amp_time - package_time
         local_ntp = system_to_ntp_time(received_local)
-        offset = amp_time - local_ntp
         self._clock_base_time = amp_time
         self._clock_base_local = received_local
         self._offset_history.append({
             'source': source,
             'local_time': received_local,
             'local_ntp': local_ntp,
+            'package_time': package_time,
             'amp_time': amp_time,
-            'offset': offset,
+            'difference': difference,
+            'offset': difference,
         })
         if self._debug:
+            diff_text = 'None' if difference is None else f'{difference:.9f}'
             print(
                 f'{cyan}ECI clock update source={source} '
-                f'amp_time={amp_time:.9f} local_ntp={local_ntp:.9f} '
-                f'offset={offset:.9f}{reset}'
+                f'amp_time={amp_time:.9f} package_time={package_time!r} '
+                f'amp-package={diff_text}{reset}'
             )
+
+    def _estimated_amp_time_at(self, local_time: float) -> float:
+        return self._clock_base_time + (local_time - self._clock_base_local)
 
     @check_connected
     def send_command(

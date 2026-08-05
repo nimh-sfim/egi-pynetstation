@@ -49,21 +49,30 @@ def print_offsets(ns: NetStation) -> None:
         return
 
     print('\nClock offset observations:')
-    print('idx  source    local_elapsed_s  offset_s')
+    print('idx  source    local_elapsed_s  amp-package_s')
     t0 = history[0]['local_time']
     for idx, item in enumerate(history):
         elapsed = item['local_time'] - t0
+        difference = item.get('difference', item.get('offset'))
+        diff_text = 'n/a' if difference is None else f'{difference:> .9f}'
         print(
             f'{idx:>3}  {item["source"]:<8}  '
-            f'{elapsed:>15.6f}  {item["offset"]:> .9f}'
+            f'{elapsed:>15.6f}  {diff_text}'
         )
 
-    if len(history) < 2:
+    regression_history = [
+        item for item in history
+        if item.get('difference', item.get('offset')) is not None
+    ]
+    if len(regression_history) < 2:
         print('Need at least two observations for a linear drift estimate.')
         return
 
-    xs = [item['local_time'] - t0 for item in history]
-    ys = [item['offset'] for item in history]
+    xs = [item['local_time'] - t0 for item in regression_history]
+    ys = [
+        item.get('difference', item.get('offset'))
+        for item in regression_history
+    ]
     mean_x = sum(xs) / len(xs)
     mean_y = sum(ys) / len(ys)
     denom = sum((x - mean_x) ** 2 for x in xs)
@@ -73,9 +82,9 @@ def print_offsets(ns: NetStation) -> None:
     slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
     intercept = mean_y - slope * mean_x
     predicted_now = intercept + slope * (time.time() - t0)
-    print('Linear offset estimate:')
-    print(f'  offset = {intercept:.9f} + {slope:.12f} * elapsed_seconds')
-    print(f'  predicted offset now: {predicted_now:.9f} s')
+    print('Linear amp-package estimate:')
+    print(f'  difference = {intercept:.9f} + {slope:.12f} * elapsed_seconds')
+    print(f'  predicted difference now: {predicted_now:.9f} s')
 
 
 def read_key() -> str:
