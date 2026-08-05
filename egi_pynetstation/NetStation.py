@@ -3,6 +3,9 @@
 
 """Abstraction of the NetStation SDK as an object"""
 
+import binascii
+import json
+import logging
 import time
 from math import floor
 from typing import Union
@@ -16,6 +19,7 @@ from .exceptions import *
 
 cyan = '\u001b[36;1m'
 reset = '\u001b[0m'
+logger = logging.getLogger(__name__)
 
 
 class NetStation(object):
@@ -64,7 +68,14 @@ class NetStation(object):
     we can add that to the documentation!
     """
     # TODO: implement simple clock using _mstime
-    def __init__(self, ipv4: str, port: int, endian: str = 'NTEL') -> None:
+    def __init__(
+        self,
+        ipv4: str,
+        port: int,
+        endian: str = 'NTEL',
+        debug: bool = False,
+        error_log: str = None,
+    ) -> None:
         """Constructor for NetStation
 
         Parameters
@@ -72,6 +83,8 @@ class NetStation(object):
         ipv4: the ipv4 address to use for the amplifier
         port: the port number to use for the amplifier
         endian: the endianness of the machine; see eci.allowed_endians
+        debug: print ECI command and response bytes when True
+        error_log: optional path for JSON-lines ECI error records
 
 
         See Also
@@ -83,7 +96,13 @@ class NetStation(object):
         if not (endian in allowed_endians):
             raise NetStationIllegalArgument(endian)
         self._endian = endian
+        self._debug = debug
+        self._error_log = error_log
         self._mstime = None
+        self._syncepoch = None
+        self._clock_base_time = None
+        self._clock_base_local = None
+        self._offset_history = []
         self._recording_start = None
 
     def check_connected(func) -> None:
@@ -101,7 +120,7 @@ class NetStation(object):
         def wrapper(*args, **kwargs):
             if args[0]._connected:
                 try:
-                    func(*args, **kwargs)
+                    return func(*args, **kwargs)
                 except ConnectionResetError:
                     raise RuntimeError(
                         "The server forcibly reset the connection, this "
@@ -117,13 +136,27 @@ class NetStation(object):
                 raise NetStationUnconnected()
         return wrapper
 
-    def connect(self, clock: str = 'ntp', ntp_ip: str = None) -> None:
+    def set_debug(self, debug: bool = True) -> None:
+        """Enable or disable debug output for ECI traffic."""
+        self._debug = debug
+
+    def set_error_log(self, path: str = None) -> None:
+        """Set a JSON-lines log path for ECI response errors."""
+        self._error_log = path
+
+    def connect(
+        self,
+        clock: str = 'ntp',
+        ntp_ip: str = None,
+        handshake: bool = True,
+    ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
         Parameters
         ----------
         clock: either 'ntp' or 'simple', indicating clock sync method
         ntp_ip: the IP address of the NTP server on the amplifier
+        handshake: send Query and Attention immediately after connecting
 
         Raises
         ------
@@ -151,8 +184,9 @@ class NetStation(object):
         self._socket.connect()
         self._connected = True
         self._ntp_ip = ntp_ip
-        self._command('Query', self._endian)
-        self._command('Attention')
+        if handshake:
+            self._command('Query', self._endian)
+            self._command('Attention')
 
     @check_connected
     def ntpsync(self):
@@ -168,39 +202,52 @@ class NetStation(object):
         cresponse = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
+        self._update_clock_from_amp_time(ntp_t, t, source='ntpsync')
         # TODO: Turn into a debug option
         # print('Sent local time: ' + format_time(t))
         # print(f'NTP offset is approx {self._offset}')
         # print(f'Syncepoch is approx {self._syncepoch}')
+        return cresponse
 
     @check_connected
     def resync(self):
-        """Ensure clocks are synchronized"""
-        self.ntpsync()
+        """Update local clock estimate from the amplifier clock.
+
+        Net Station appears to return the NTPReturnClock timestamp on the
+        following ECI response. To account for that behavior, this sends
+        NTPReturnClock and then sends a RESY event, using the event response
+        as the amplifier's current time when a timestamp is returned.
+        """
+        if not self._ntp_ip:
+            raise NetStationNoNTPIP()
+        if self._syncepoch is None:
+            raise RuntimeError('resync is unavailable before NTP sync')
+        request_local = time.time()
+        request_ntp = system_to_ntp_time(request_local)
+        self._command('Attention')
+        response = self._command('NTPReturnClock', request_ntp)
+        event_response = self.send_event(event_type="resy", label='resy')
+        received_local = time.time()
+        if isinstance(event_response, float):
+            self._update_clock_from_amp_time(
+                event_response,
+                received_local,
+                source='resync',
+            )
+        return event_response if isinstance(event_response, float) else response
     
     
     @check_connected
     def getTime(self):
-        return time.time() - self._syncepoch
+        if self._clock_base_time is None or self._clock_base_local is None:
+            raise RuntimeError('getTime is unavailable before NTP sync')
+        return self._clock_base_time + (time.time() - self._clock_base_local)
     
     
     @check_connected
     def resync_do_not_use_not_recommended(self):
-        """Perform a re-synchronization: NOT RECOMMENDED; INCLUDED FOR COMPLETENESS"""
-        if not self._ntp_ip:
-            raise NetStationNoNTPIP()
-        if not self._ntpsynced:
-            self.ntpsync()
-        c = NTPClient()
-        response = c.request(self._ntp_ip, version=3)
-        t = time.time()
-        ntp_t = system_to_ntp_time(t)
-        response = self._command('NTPReturnClock', ntp_t + response.offset)
-        self.send_event(event_type="RESY")
-        # TODO: Turn into a debug option
-        # print('Sent local time: ' + format_time(t))
-        # print(f'NTP offset is approx {self._offset}')
-        # print(f'Response is {response} (or {format_time(response)}')
+        """Backward-compatible alias for resync()."""
+        return self.resync()
 
     @check_connected
     def disconnect(self) -> None:
@@ -297,7 +344,7 @@ class NetStation(object):
         data = package_event(
             start, duration, event_type, label, desc, data
         )
-        self._command('EventData', data)
+        return self._command('EventData', data)
 
     def rec_start(self) -> float:
         """Get recording start time from time.time()
@@ -320,7 +367,147 @@ class NetStation(object):
         else:
             return None
 
-    def _command(self, cmd: str, data=None) -> Union[bool, float, int]:
+    def clock_offsets(self) -> list:
+        """Return clock offset observations collected by resync()."""
+        return list(self._offset_history)
+
+    def _update_clock_from_amp_time(
+        self,
+        amp_time: float,
+        received_local: float,
+        source: str,
+    ) -> None:
+        local_ntp = system_to_ntp_time(received_local)
+        offset = amp_time - local_ntp
+        self._clock_base_time = amp_time
+        self._clock_base_local = received_local
+        self._offset_history.append({
+            'source': source,
+            'local_time': received_local,
+            'local_ntp': local_ntp,
+            'amp_time': amp_time,
+            'offset': offset,
+        })
+        if self._debug:
+            print(
+                f'{cyan}ECI clock update source={source} '
+                f'amp_time={amp_time:.9f} local_ntp={local_ntp:.9f} '
+                f'offset={offset:.9f}{reset}'
+            )
+
+    @check_connected
+    def send_command(
+        self,
+        cmd: str,
+        data=None,
+        strict: bool = False,
+    ) -> object:
+        """Send one ECI command and return the parsed server response.
+
+        This is intended for diagnostics and manual testing. Most
+        experiment code should use the higher-level methods instead.
+        When strict is False, unexpected ECI responses are returned as a
+        diagnostic dictionary instead of being raised.
+        """
+        return self._command(cmd, data, strict=strict)
+
+    def _format_bytes(self, bytearr: bytes) -> str:
+        """Return compact hex/ascii debug text for a byte string."""
+        if not isinstance(bytearr, bytes):
+            return repr(bytearr)
+        hexed = binascii.hexlify(bytearr, sep=' ').decode('ascii')
+        ascii_text = ''.join(
+            chr(b) if 32 <= b <= 126 else '.'
+            for b in bytearr
+        )
+        return f'len={len(bytearr)} hex=[{hexed}] ascii={ascii_text!r}'
+
+    def _debug_tx(self, cmd: str, data: object, bytearr: bytes) -> None:
+        if self._debug:
+            print(
+                f'{cyan}ECI TX {cmd} data={data!r}: '
+                f'{self._format_bytes(bytearr)}{reset}'
+            )
+
+    def _debug_rx(self, bytearr: bytes, parsed: object = None) -> None:
+        if self._debug:
+            print(
+                f'{cyan}ECI RX raw: {self._format_bytes(bytearr)} '
+                f'parsed={parsed!r}{reset}'
+            )
+
+    def _debug_rx_error(self, bytearr: bytes, err: Exception) -> None:
+        if self._debug:
+            message = getattr(err, 'message', str(err))
+            print(
+                f'{cyan}ECI RX raw: {self._format_bytes(bytearr)} '
+                f'error={type(err).__name__}: {message}{reset}'
+            )
+
+    def _response_record(self, bytearr: bytes, err: Exception) -> dict:
+        return {
+            'ok': False,
+            'unexpected': isinstance(err, InvalidECIResponse),
+            'error': type(err).__name__,
+            'message': getattr(err, 'message', str(err)),
+            'raw': bytearr,
+            'raw_display': self._format_bytes(bytearr),
+        }
+
+    def _write_error_log(
+        self,
+        cmd: str,
+        bytearr: bytes,
+        err: Exception,
+    ) -> None:
+        if not self._error_log:
+            return
+        record = {
+            'time': time.time(),
+            'cmd': cmd,
+            'error': type(err).__name__,
+            'message': getattr(err, 'message', str(err)),
+            'unexpected': isinstance(err, InvalidECIResponse),
+            'raw_hex': binascii.hexlify(bytearr).decode('ascii'),
+            'raw_display': self._format_bytes(bytearr),
+        }
+        with open(self._error_log, 'a', encoding='utf-8') as logfile:
+            logfile.write(json.dumps(record, sort_keys=True) + '\n')
+
+    def _log_unexpected_response(
+        self,
+        cmd: str,
+        bytearr: bytes,
+        err: Exception,
+    ) -> None:
+        logger.warning(
+            'Unexpected ECI response for %s: %s; raw=%s',
+            cmd,
+            getattr(err, 'message', str(err)),
+            self._format_bytes(bytearr),
+        )
+        self._write_error_log(cmd, bytearr, err)
+
+    def _log_response_failure(
+        self,
+        cmd: str,
+        bytearr: bytes,
+        err: Exception,
+    ) -> None:
+        logger.error(
+            'ECI response failure for %s: %s; raw=%s',
+            cmd,
+            getattr(err, 'message', str(err)),
+            self._format_bytes(bytearr),
+        )
+        self._write_error_log(cmd, bytearr, err)
+
+    def _command(
+        self,
+        cmd: str,
+        data=None,
+        strict: bool = True,
+    ) -> Union[bool, float, int, dict]:
         """Send a command to the amplifier; please do not use as this is
         internal.
 
@@ -328,6 +515,7 @@ class NetStation(object):
         ----------
         cmd: the command to send
         data: the data to send with it
+        strict: raise ECI response parsing exceptions when True
 
         Returns
         -------
@@ -345,7 +533,20 @@ class NetStation(object):
         if not self._connected:
             raise NetStationUnconnected()
         eci_cmd = build_command(cmd, data)
-        # TODO: turn into a debug option
-        # print(f'{cyan}Sending command: {eci_cmd}{reset}')
+        self._debug_tx(cmd, data, eci_cmd)
         self._socket.write(eci_cmd)
-        return parse_response(self._socket.read())
+        response = self._socket.read()
+        try:
+            parsed = parse_response(response)
+        except InvalidECIResponse as err:
+            self._debug_rx_error(response, err)
+            self._log_unexpected_response(cmd, response, err)
+            return self._response_record(response, err)
+        except ECIResponseFailure as err:
+            self._debug_rx_error(response, err)
+            self._log_response_failure(cmd, response, err)
+            if strict:
+                raise
+            return self._response_record(response, err)
+        self._debug_rx(response, parsed)
+        return parsed
