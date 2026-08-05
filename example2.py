@@ -121,9 +121,10 @@ def print_menu(connected: bool, profile: str, ip_cmd: str, port_cmd: int,
     print('q  Query                      y  NewQuery')
     print('a  Attention                  t  ClockSync')
     print('n  raw NTPClockSync           i  high-level ntpsync')
-    print('s  high-level resync          p  raw NTPReturnClock')
-    print('b  BeginRecording             e  EndRecording')
-    print('v  EventData simple           d  EventData with data')
+    print('s  high-level resync          S  resync with Attention')
+    print('p  raw NTPReturnClock         b  BeginRecording')
+    print('e  EndRecording               v  EventData simple')
+    print('d  EventData with data')
     print('o  show offset history        x  Exit + close socket')
     print('?  redraw menu                Ctrl-C or Ctrl-D to quit')
     print('=' * 72)
@@ -264,6 +265,9 @@ def main() -> None:
         'i': ('high-level ntpsync', lambda: ns.ntpsync()
               if ensure_connected() else None),
         's': ('high-level resync', lambda: ns.resync()
+              if ensure_connected() else None),
+        'S': ('high-level resync with Attention',
+              lambda: ns.resync(attention=True)
               if ensure_connected() else None),
         'p': ('raw NTPReturnClock', lambda: send('NTPReturnClock', ntp_now())()),
         'b': ('BeginRecording', send('BeginRecording')),

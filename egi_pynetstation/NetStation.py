@@ -210,13 +210,19 @@ class NetStation(object):
         return cresponse
 
     @check_connected
-    def resync(self):
+    def resync(self, attention: bool = False):
         """Update local clock estimate from the amplifier clock.
 
         Net Station appears to return the NTPReturnClock timestamp on the
         following ECI response. To account for that behavior, this sends
-        NTPReturnClock and then sends a RESY event, using the event response
+        NTPReturnClock and then sends a resy event, using the event response
         as the amplifier's current time when a timestamp is returned.
+
+        Parameters
+        ----------
+        attention: send Attention immediately before NTPReturnClock. This
+        defaults to False because some Net Station configurations appear to
+        suppress the delayed timestamp response after Attention.
         """
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
@@ -224,7 +230,8 @@ class NetStation(object):
             raise RuntimeError('resync is unavailable before NTP sync')
         request_local = time.time()
         request_ntp = system_to_ntp_time(request_local)
-        self._command('Attention')
+        if attention:
+            self._command('Attention')
         response = self._command('NTPReturnClock', request_ntp)
         event_response = self.send_event(event_type="resy", label='resy')
         received_local = time.time()
