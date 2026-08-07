@@ -20,6 +20,36 @@ from pathlib import Path
 from egi_pynetstation.NetStation import NetStation
 
 
+def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
+    """Connect, using drift options when the installed package supports them."""
+    try:
+        ns.connect(
+            ntp_ip=ntp_ip,
+            handshake=True,
+            drift_correction=not args.no_drift_correction,
+            drift_min_samples=args.drift_min_samples,
+            drift_min_span=args.drift_min_span,
+        )
+    except TypeError as err:
+        if 'drift_correction' not in str(err):
+            raise
+        print(
+            'Warning: imported NetStation.connect() does not accept '
+            'drift_correction. Falling back to the older connect() API. '
+            'Install this repository with `pip install -e .` to use the '
+            'built-in drift corrector.',
+            file=sys.stderr,
+        )
+        ns.connect(ntp_ip=ntp_ip)
+        if hasattr(ns, 'set_drift_requirements'):
+            ns.set_drift_requirements(
+                args.drift_min_samples,
+                args.drift_min_span,
+            )
+        if hasattr(ns, 'set_drift_correction'):
+            ns.set_drift_correction(not args.no_drift_correction)
+
+
 def build_isi_sequence(duration: float) -> list:
     """Build mixed inter-stimulus intervals for a roughly five-minute run."""
     isis = []
@@ -212,13 +242,7 @@ def main() -> int:
             debug=args.debug,
             error_log=args.error_log,
         )
-        ns.connect(
-            ntp_ip=ip_clock,
-            handshake=True,
-            drift_correction=not args.no_drift_correction,
-            drift_min_samples=args.drift_min_samples,
-            drift_min_span=args.drift_min_span,
-        )
+        connect_with_drift_options(ns, ip_clock, args)
         ns.send_command('BeginRecording')
         ns.ntpsync()
         if args.ntpsync_every:

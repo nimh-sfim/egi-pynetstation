@@ -25,6 +25,44 @@ def _message(err: Exception) -> str:
     return getattr(err, 'message', str(err))
 
 
+def connect_with_drift_options(
+    ns: NetStation,
+    ntp_ip: str,
+    handshake: bool,
+    args,
+) -> None:
+    """Connect while remaining compatible with older installed packages."""
+    try:
+        ns.connect(
+            ntp_ip=ntp_ip,
+            handshake=handshake,
+            drift_correction=not args.no_drift_correction,
+            drift_min_samples=args.drift_min_samples,
+            drift_min_span=args.drift_min_span,
+        )
+    except TypeError as err:
+        if 'drift_correction' not in str(err):
+            raise
+        print(
+            'Warning: imported NetStation.connect() does not accept '
+            'drift_correction. Falling back to the older connect() API. '
+            'Install this repository with `pip install -e .` to use the '
+            'built-in drift corrector.',
+            file=sys.stderr,
+        )
+        try:
+            ns.connect(ntp_ip=ntp_ip, handshake=handshake)
+        except TypeError:
+            ns.connect(ntp_ip=ntp_ip)
+        if hasattr(ns, 'set_drift_requirements'):
+            ns.set_drift_requirements(
+                args.drift_min_samples,
+                args.drift_min_span,
+            )
+        if hasattr(ns, 'set_drift_correction'):
+            ns.set_drift_correction(not args.no_drift_correction)
+
+
 def print_result(result: object, ns: NetStation = None) -> None:
     if isinstance(result, dict) and not result.get('ok', True):
         label = 'Unexpected response' if result.get('unexpected') else 'ECI response error'
@@ -368,25 +406,13 @@ def main() -> None:
     def connect_socket_only() -> object:
         if ns._connected:
             return 'already connected'
-        ns.connect(
-            ntp_ip=ip_clock,
-            handshake=False,
-            drift_correction=not args.no_drift_correction,
-            drift_min_samples=args.drift_min_samples,
-            drift_min_span=args.drift_min_span,
-        )
+        connect_with_drift_options(ns, ip_clock, False, args)
         return True
 
     def connect_with_handshake() -> object:
         if ns._connected:
             return 'already connected'
-        ns.connect(
-            ntp_ip=ip_clock,
-            handshake=True,
-            drift_correction=not args.no_drift_correction,
-            drift_min_samples=args.drift_min_samples,
-            drift_min_span=args.drift_min_span,
-        )
+        connect_with_drift_options(ns, ip_clock, True, args)
         return True
 
     def close() -> object:

@@ -176,6 +176,25 @@ times, send results, and NTP offset samples.
 Use the exported Net Station EVT file and a photocell channel to check whether
 the `stm+` marker-to-photocell offset stays stable across the run.
 
+For a longer one-hour validation run:
+
+```bash
+python psychopy_photocell_drift.py amp \
+  --fullscreen \
+  --screen 1 \
+  --duration 3600 \
+  --sample-interval 60 \
+  --drift-min-samples 6 \
+  --drift-min-span 300 \
+  --log /Volumes/PJM/logs/photocell_drift_1hr.csv \
+  --error-log /Volumes/PJM/logs/photocell_drift_1hr_errors.jsonl
+```
+
+This samples NTP drift once per minute and waits for at least 6 samples over
+5 minutes before applying drift correction. That keeps the early correction
+conservative while still letting the model track slow drift during the rest of
+the recording.
+
 For comparison runs, the PsychoPy script can intentionally send repeated ECI
 `ntpsync()` commands before stimuli. This is diagnostic only and is not the
 recommended production timing mode:
