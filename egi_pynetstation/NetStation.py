@@ -8,11 +8,15 @@ import json
 import logging
 import time
 from math import floor
+from pathlib import Path
 from typing import Union
 
 from ntplib import system_to_ntp_time, NTPClient
 
-from .eci import build_command, parse_response, allowed_endians, package_event
+from .eci import (
+    build_command, parse_response, split_response_tokens, allowed_endians,
+    package_event,
+)
 from .socket_wrapper import Socket
 from .util import format_time
 from .exceptions import *
@@ -100,9 +104,14 @@ class NetStation(object):
         self._error_log = error_log
         self._mstime = None
         self._syncepoch = None
-        self._clock_base_time = None
-        self._clock_base_local = None
-        self._offset_history = []
+        self._sync_monotonic = None
+        self._sync_system_time = None
+        self._client_clock_start_ntp = None
+        self._server_clock_start_ntp = None
+        self._clock_start_history = []
+        self._drift_history = []
+        self._drift_correction = False
+        self._response_tokens = []
         self._recording_start = None
 
     def check_connected(func) -> None:
@@ -198,11 +207,20 @@ class NetStation(object):
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
+        monotonic_t = time.monotonic()
         ntp_t = system_to_ntp_time(t + response.offset)
         cresponse = self._command('NTPClockSync', ntp_t)
         self._offset = response.offset
         self._syncepoch = t
-        self._update_clock_from_amp_time(ntp_t, t, source='ntpsync')
+        self._sync_system_time = t
+        self._sync_monotonic = monotonic_t
+        self._client_clock_start_ntp = ntp_t
+        self._record_ntp_drift_sample(
+            response,
+            source='ntpsync',
+            local_time=t,
+            monotonic_time=monotonic_t,
+        )
         # TODO: Turn into a debug option
         # print('Sent local time: ' + format_time(t))
         # print(f'NTP offset is approx {self._offset}')
@@ -211,44 +229,76 @@ class NetStation(object):
 
     @check_connected
     def resync(self, attention: bool = False):
-        """Update local clock estimate from the amplifier clock.
+        """Backward-compatible alias for sync_return_clock()."""
+        return self.sync_return_clock(attention=attention)
+
+    @check_connected
+    def sync_return_clock(
+        self,
+        attention: bool = False,
+        max_followups: int = 3,
+    ):
+        """Update the server clock-start estimate.
 
         Net Station appears to return the NTPReturnClock timestamp on the
         following ECI response. To account for that behavior, this sends
-        NTPReturnClock and then sends a resy event, using the event response
-        as the amplifier's current time when a timestamp is returned.
+        NTPReturnClock and then sends resy events until a timestamp is
+        returned, using that timestamp as the amplifier/server clock start.
 
         Parameters
         ----------
         attention: send Attention immediately before NTPReturnClock. This
         defaults to False because some Net Station configurations appear to
         suppress the delayed timestamp response after Attention.
+        max_followups: number of resy events to send while waiting for the
+        delayed timestamp.
         """
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
-        if self._syncepoch is None:
-            raise RuntimeError('resync is unavailable before NTP sync')
-        request_local = time.time()
-        request_ntp = system_to_ntp_time(request_local)
+        if self._client_clock_start_ntp is None:
+            raise RuntimeError('sync_return_clock is unavailable before NTP sync')
         if attention:
             self._command('Attention')
-        response = self._command('NTPReturnClock', request_ntp)
-        event_response = self.send_event(event_type="resy", label='resy')
-        received_local = time.time()
-        if isinstance(event_response, float):
-            self._update_clock_from_amp_time(
-                event_response,
-                received_local,
-                source='resync',
+        response = self._command('NTPReturnClock', self._client_clock_start_ntp)
+        if isinstance(response, float):
+            self._update_server_clock_start(
+                response,
+                time.time(),
+                source='return_clock',
             )
-        return event_response if isinstance(event_response, float) else response
+            return response
+
+        last_response = response
+        for _ in range(max_followups):
+            event_response = self.send_event(event_type="resy", label='resy')
+            if isinstance(event_response, float):
+                self._update_server_clock_start(
+                    event_response,
+                    time.time(),
+                    source='return_clock_followup',
+                )
+                return event_response
+            last_response = event_response
+        return last_response
     
     
     @check_connected
     def getTime(self):
-        if self._clock_base_time is None or self._clock_base_local is None:
+        if self._syncepoch is None:
             raise RuntimeError('getTime is unavailable before NTP sync')
-        return self._estimated_amp_time_at(time.time())
+
+        if self._sync_monotonic is None:
+            return time.time() - self._syncepoch
+
+        elapsed = time.monotonic() - self._sync_monotonic
+        if not self._drift_correction:
+            return elapsed
+
+        initial_offset = getattr(self, '_offset', None)
+        predicted_offset = self._predict_ntp_offset(elapsed)
+        if initial_offset is None or predicted_offset is None:
+            return elapsed
+        return elapsed + (predicted_offset - initial_offset)
     
     
     @check_connected
@@ -340,7 +390,7 @@ class NetStation(object):
         eci.eci for explanations of the internals of the packaging
         """
         if start == 'now':
-            start = time.time() - self._syncepoch
+            start = self.getTime()
         elif isinstance(start, float):
             start = start
         else:
@@ -375,42 +425,185 @@ class NetStation(object):
             return None
 
     def clock_offsets(self) -> list:
-        """Return clock offset observations collected by resync()."""
-        return list(self._offset_history)
+        """Return server clock-start observations collected by resync()."""
+        return list(self._clock_start_history)
 
-    def _update_clock_from_amp_time(
+    def drift_history(self) -> list:
+        """Return NTP offset observations used for drift correction."""
+        return list(self._drift_history)
+
+    def drift_estimate(self) -> dict:
+        """Return the current linear NTP drift estimate."""
+        estimate = self._ntp_drift_regression()
+        if estimate is None:
+            return {
+                'enabled': self._drift_correction,
+                'samples': len(self._drift_history),
+                'slope': None,
+                'intercept': None,
+                'predicted_offset': getattr(self, '_offset', None),
+                'initial_offset': getattr(self, '_offset', None),
+            }
+        elapsed = None
+        if self._sync_monotonic is not None:
+            elapsed = time.monotonic() - self._sync_monotonic
+        predicted = self._predict_ntp_offset(elapsed)
+        return {
+            'enabled': self._drift_correction,
+            'samples': len(self._drift_history),
+            'slope': estimate['slope'],
+            'intercept': estimate['intercept'],
+            'predicted_offset': predicted,
+            'initial_offset': getattr(self, '_offset', None),
+            'elapsed': elapsed,
+        }
+
+    @check_connected
+    def set_drift_correction(self, enabled: bool = True) -> bool:
+        """Enable or disable drift-corrected getTime()."""
+        self._drift_correction = enabled
+        return self._drift_correction
+
+    @check_connected
+    def sample_drift(self) -> dict:
+        """Query the NTP server and record an offset sample.
+
+        This does not send any ECI clock-sync command. It only asks the
+        amplifier/Net Station NTP server for the current NTP offset so that
+        client-side timestamps can be drift-corrected.
+        """
+        if not self._ntp_ip:
+            raise NetStationNoNTPIP()
+        if self._syncepoch is None:
+            raise RuntimeError('sample_drift is unavailable before NTP sync')
+        c = NTPClient()
+        response = c.request(self._ntp_ip, version=3)
+        return self._record_ntp_drift_sample(response, source='drift_sample')
+
+    def clock_state(self) -> dict:
+        """Return current client/server clock synchronization state."""
+        drift = self.drift_estimate()
+        return {
+            'client_clock_start_ntp': self._client_clock_start_ntp,
+            'server_clock_start_ntp': self._server_clock_start_ntp,
+            'syncepoch': self._syncepoch,
+            'sync_monotonic': self._sync_monotonic,
+            'ntp_offset': getattr(self, '_offset', None),
+            'drift_correction': self._drift_correction,
+            'drift_samples': len(self._drift_history),
+            'drift_slope': drift.get('slope'),
+            'predicted_ntp_offset': drift.get('predicted_offset'),
+        }
+
+    def _record_ntp_drift_sample(
         self,
-        amp_time: float,
+        response,
+        source: str,
+        local_time: float = None,
+        monotonic_time: float = None,
+    ) -> dict:
+        if local_time is None:
+            local_time = time.time()
+        if monotonic_time is None:
+            monotonic_time = time.monotonic()
+        elapsed = None
+        if self._sync_monotonic is not None:
+            elapsed = monotonic_time - self._sync_monotonic
+        sample = {
+            'source': source,
+            'local_time': local_time,
+            'monotonic_time': monotonic_time,
+            'elapsed': elapsed,
+            'offset': response.offset,
+            'delay': response.delay,
+            'tx_time': response.tx_time,
+        }
+        self._drift_history.append(sample)
+        if self._debug:
+            elapsed_text = 'None' if elapsed is None else f'{elapsed:.6f}'
+            print(
+                f'{cyan}NTP drift sample source={source} '
+                f'elapsed={elapsed_text} offset={response.offset:.9f} '
+                f'delay={response.delay:.9f}{reset}'
+            )
+        return dict(sample)
+
+    def _ntp_drift_regression(self):
+        samples = [
+            sample for sample in self._drift_history
+            if sample.get('elapsed') is not None
+        ]
+        if len(samples) < 2:
+            return None
+
+        xs = [sample['elapsed'] for sample in samples]
+        ys = [sample['offset'] for sample in samples]
+        mean_x = sum(xs) / len(xs)
+        mean_y = sum(ys) / len(ys)
+        denom = sum((x - mean_x) ** 2 for x in xs)
+        if denom == 0:
+            return None
+        slope = sum((x - mean_x) * (y - mean_y)
+                    for x, y in zip(xs, ys)) / denom
+        intercept = mean_y - slope * mean_x
+        return {
+            'slope': slope,
+            'intercept': intercept,
+        }
+
+    def _predict_ntp_offset(self, elapsed: float = None):
+        if elapsed is None:
+            if self._sync_monotonic is None:
+                return getattr(self, '_offset', None)
+            elapsed = time.monotonic() - self._sync_monotonic
+
+        estimate = self._ntp_drift_regression()
+        if estimate is None:
+            if self._drift_history:
+                return self._drift_history[-1]['offset']
+            return getattr(self, '_offset', None)
+        return estimate['intercept'] + estimate['slope'] * elapsed
+
+    def _update_server_clock_start(
+        self,
+        server_start_ntp: float,
         received_local: float,
         source: str,
     ) -> None:
-        package_time = None
+        previous_start = self._server_clock_start_ntp
         difference = None
-        if self._clock_base_time is not None and self._clock_base_local is not None:
-            package_time = self._estimated_amp_time_at(received_local)
-            difference = amp_time - package_time
+        if previous_start is not None:
+            difference = server_start_ntp - previous_start
         local_ntp = system_to_ntp_time(received_local)
-        self._clock_base_time = amp_time
-        self._clock_base_local = received_local
-        self._offset_history.append({
+        client_server_start_difference = None
+        if self._client_clock_start_ntp is not None:
+            client_server_start_difference = (
+                server_start_ntp - self._client_clock_start_ntp
+            )
+        self._server_clock_start_ntp = server_start_ntp
+        self._clock_start_history.append({
             'source': source,
             'local_time': received_local,
             'local_ntp': local_ntp,
-            'package_time': package_time,
-            'amp_time': amp_time,
+            'client_clock_start_ntp': self._client_clock_start_ntp,
+            'previous_server_clock_start_ntp': previous_start,
+            'server_clock_start_ntp': server_start_ntp,
+            'client_server_start_difference': client_server_start_difference,
             'difference': difference,
             'offset': difference,
         })
         if self._debug:
             diff_text = 'None' if difference is None else f'{difference:.9f}'
             print(
-                f'{cyan}ECI clock update source={source} '
-                f'amp_time={amp_time:.9f} package_time={package_time!r} '
-                f'amp-package={diff_text}{reset}'
+                f'{cyan}ECI server clock start update source={source} '
+                f'server_start={server_start_ntp:.9f} '
+                f'previous_start={previous_start!r} '
+                f'start_delta={diff_text}{reset}'
             )
 
-    def _estimated_amp_time_at(self, local_time: float) -> float:
-        return self._clock_base_time + (local_time - self._clock_base_local)
+    def _local_ntp_now(self) -> float:
+        offset = getattr(self, '_offset', 0)
+        return system_to_ntp_time(time.time() + offset)
 
     @check_connected
     def send_command(
@@ -453,6 +646,13 @@ class NetStation(object):
                 f'parsed={parsed!r}{reset}'
             )
 
+    def _debug_rx_read(self, bytearr: bytes, tokens: list) -> None:
+        if self._debug and len(tokens) > 1:
+            print(
+                f'{cyan}ECI RX stream: {self._format_bytes(bytearr)} '
+                f'tokens={len(tokens)}{reset}'
+            )
+
     def _debug_rx_error(self, bytearr: bytes, err: Exception) -> None:
         if self._debug:
             message = getattr(err, 'message', str(err))
@@ -488,6 +688,7 @@ class NetStation(object):
             'raw_hex': binascii.hexlify(bytearr).decode('ascii'),
             'raw_display': self._format_bytes(bytearr),
         }
+        Path(self._error_log).parent.mkdir(parents=True, exist_ok=True)
         with open(self._error_log, 'a', encoding='utf-8') as logfile:
             logfile.write(json.dumps(record, sort_keys=True) + '\n')
 
@@ -518,6 +719,16 @@ class NetStation(object):
             self._format_bytes(bytearr),
         )
         self._write_error_log(cmd, bytearr, err)
+
+    def _read_response_token(self) -> bytes:
+        if not self._response_tokens:
+            response = self._socket.read()
+            tokens = split_response_tokens(response)
+            self._debug_rx_read(response, tokens)
+            self._response_tokens.extend(tokens)
+        if self._response_tokens:
+            return self._response_tokens.pop(0)
+        return b''
 
     def _command(
         self,
@@ -552,7 +763,7 @@ class NetStation(object):
         eci_cmd = build_command(cmd, data)
         self._debug_tx(cmd, data, eci_cmd)
         self._socket.write(eci_cmd)
-        response = self._socket.read()
+        response = self._read_response_token()
         try:
             parsed = parse_response(response)
         except InvalidECIResponse as err:

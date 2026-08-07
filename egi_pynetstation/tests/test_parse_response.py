@@ -3,7 +3,7 @@
 
 import pytest
 from egi_pynetstation.exceptions import *
-from egi_pynetstation.eci import parse_response, INT_VAL_S
+from egi_pynetstation.eci import parse_response, split_response_tokens, INT_VAL_S
 from egi_pynetstation.util import sys_to_bytes, get_ntp_byte
 
 invalid_id = sys_to_bytes(0, 1)
@@ -68,3 +68,28 @@ def test_parse_gets_NTP():
 
     test = parse_response(id_byte + valid_ntp)
     assert test == correct_ntp
+
+
+def test_split_response_tokens_gets_singletons():
+    assert split_response_tokens(b'ZZ') == [b'Z', b'Z']
+
+
+def test_split_response_tokens_gets_timestamp_with_trailing_status():
+    assert split_response_tokens(valid_ntp + b'Z') == [valid_ntp + b'Z']
+
+
+def test_split_response_tokens_gets_s_timestamp_and_status():
+    id_byte = sys_to_bytes(INT_VAL_S, 1)
+    assert split_response_tokens(id_byte + valid_ntp + b'Z') == [
+        id_byte + valid_ntp,
+        b'Z',
+    ]
+
+
+def test_split_response_tokens_gets_multiple_timestamps():
+    id_byte = sys_to_bytes(INT_VAL_S, 1)
+    assert split_response_tokens(valid_ntp + id_byte + valid_ntp + b'Z') == [
+        valid_ntp,
+        id_byte + valid_ntp,
+        b'Z',
+    ]

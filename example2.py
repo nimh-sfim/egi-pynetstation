@@ -11,6 +11,8 @@ bytes sent to Net Station and the raw/parsed response.
 import sys
 import time
 from argparse import ArgumentParser
+from contextlib import redirect_stdout
+from pathlib import Path
 from typing import Callable
 
 from ntplib import system_to_ntp_time
@@ -32,14 +34,23 @@ def print_result(result: object, ns: NetStation = None) -> None:
         print(f'Parsed result: {result!r}')
         if isinstance(result, float) and ns is not None:
             try:
-                local_elapsed = ns.getTime()
+                package_time = ns.getTime()
             except Exception as err:
                 print(f'getTime unavailable: {type(err).__name__}: {_message(err)}')
             else:
-                print('Timestamp comparison:')
-                print(f'  amplifier response: {result:.9f}')
-                print(f'  getTime():          {local_elapsed:.9f}')
-                print(f'  response-getTime:   {result - local_elapsed:.9f}')
+                print('Timestamp context:')
+                print(f'  parsed response: {result:.9f}')
+                print(f'  getTime():       {package_time:.9f}')
+                print('  note: NTPReturnClock responses are clock-start times,')
+                print('        while getTime() is elapsed time since client sync.')
+                state = ns.clock_state()
+                client_start = state.get('client_clock_start_ntp')
+                server_start = state.get('server_clock_start_ntp')
+                if client_start is not None and server_start is not None:
+                    print(
+                        '  server-client clock-start delta: '
+                        f'{server_start - client_start:.9f}'
+                    )
 
 
 def print_offsets(ns: NetStation) -> None:
@@ -48,16 +59,21 @@ def print_offsets(ns: NetStation) -> None:
         print('\nNo clock offset observations yet.')
         return
 
-    print('\nClock offset observations:')
-    print('idx  source    local_elapsed_s  amp-package_s')
+    print('\nServer clock-start observations:')
+    print('idx  source    local_elapsed_s  server_start_delta_s  client-server_start_s')
     t0 = history[0]['local_time']
     for idx, item in enumerate(history):
         elapsed = item['local_time'] - t0
         difference = item.get('difference', item.get('offset'))
         diff_text = 'n/a' if difference is None else f'{difference:> .9f}'
+        start_difference = item.get('client_server_start_difference')
+        start_diff_text = (
+            'n/a' if start_difference is None
+            else f'{start_difference:> .9f}'
+        )
         print(
             f'{idx:>3}  {item["source"]:<8}  '
-            f'{elapsed:>15.6f}  {diff_text}'
+            f'{elapsed:>15.6f}  {diff_text}  {start_diff_text}'
         )
 
     regression_history = [
@@ -82,9 +98,95 @@ def print_offsets(ns: NetStation) -> None:
     slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
     intercept = mean_y - slope * mean_x
     predicted_now = intercept + slope * (time.time() - t0)
-    print('Linear amp-package estimate:')
-    print(f'  difference = {intercept:.9f} + {slope:.12f} * elapsed_seconds')
-    print(f'  predicted difference now: {predicted_now:.9f} s')
+    print('Linear server-start stability estimate:')
+    print(f'  delta = {intercept:.9f} + {slope:.12f} * elapsed_seconds')
+    print(f'  predicted server-start delta now: {predicted_now:.9f} s')
+
+
+def print_clock_state(ns: NetStation) -> None:
+    state = ns.clock_state()
+    print('\nClock state:')
+    for key in (
+        'client_clock_start_ntp',
+        'server_clock_start_ntp',
+        'syncepoch',
+        'sync_monotonic',
+        'ntp_offset',
+        'drift_correction',
+        'drift_samples',
+        'drift_slope',
+        'predicted_ntp_offset',
+    ):
+        value = state.get(key)
+        if isinstance(value, float):
+            print(f'  {key}: {value:.9f}')
+        else:
+            print(f'  {key}: {value!r}')
+
+
+def print_drift(ns: NetStation) -> None:
+    history = ns.drift_history()
+    estimate = ns.drift_estimate()
+    if not history:
+        print('\nNo NTP drift samples yet.')
+        return
+
+    print('\nNTP drift samples:')
+    print('idx  source        elapsed_s       offset_s       delta_s       delay_s')
+    first_offset = history[0]['offset']
+    for idx, sample in enumerate(history):
+        elapsed = sample.get('elapsed')
+        elapsed_text = 'n/a' if elapsed is None else f'{elapsed:>12.6f}'
+        delta = sample['offset'] - first_offset
+        print(
+            f'{idx:>3}  {sample["source"]:<12}  {elapsed_text}  '
+            f'{sample["offset"]:>13.9f}  {delta:>12.9f}  '
+            f'{sample["delay"]:>10.6f}'
+        )
+
+    print('NTP drift estimate:')
+    print(f'  correction enabled: {estimate.get("enabled")}')
+    print(f'  samples: {estimate.get("samples")}')
+    slope = estimate.get('slope')
+    if slope is None:
+        print('  need at least two separated samples for a linear estimate')
+    else:
+        print(f'  offset slope: {slope:.12f} s/s')
+        print(f'  offset drift: {slope * 1000 * 3600:.6f} ms/hour')
+        print(
+            '  predicted offset now: '
+            f'{estimate.get("predicted_offset"):.9f} s'
+        )
+    try:
+        print(f'  getTime() now: {ns.getTime():.9f} s')
+    except Exception as err:
+        print(f'  getTime unavailable: {type(err).__name__}: {_message(err)}')
+
+
+def strip_comment(line: str) -> str:
+    return line.split('#', 1)[0].strip()
+
+
+def load_experiment(path: str) -> list:
+    steps = []
+    for lineno, line in enumerate(Path(path).read_text().splitlines(), 1):
+        command = strip_comment(line)
+        if command:
+            steps.append((lineno, command))
+    return steps
+
+
+class Tee:
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, text: str) -> None:
+        for stream in self._streams:
+            stream.write(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
 
 
 def read_key() -> str:
@@ -121,11 +223,13 @@ def print_menu(connected: bool, profile: str, ip_cmd: str, port_cmd: int,
     print('q  Query                      y  NewQuery')
     print('a  Attention                  t  ClockSync')
     print('n  raw NTPClockSync           i  high-level ntpsync')
-    print('s  high-level resync          S  resync with Attention')
+    print('s  sync return clock          S  sync return clock + Attention')
     print('p  raw NTPReturnClock         b  BeginRecording')
     print('e  EndRecording               v  EventData simple')
     print('d  EventData with data')
-    print('o  show offset history        x  Exit + close socket')
+    print('r  sample NTP drift           g  show NTP drift')
+    print('o  show offset history        k  show clock state')
+    print('x  Exit + close socket')
     print('?  redraw menu                Ctrl-C or Ctrl-D to quit')
     print('=' * 72)
     print('Press a key: ', end='', flush=True)
@@ -182,6 +286,19 @@ def main() -> None:
     p.add_argument(
         '--error-log',
         help='Append JSON-lines ECI response errors to this file',
+    )
+    p.add_argument(
+        '--experiment',
+        help='Run commands from an experiment text file before interactive mode',
+    )
+    p.add_argument(
+        '--no-interactive',
+        action='store_true',
+        help='Exit after --experiment instead of entering keypress mode',
+    )
+    p.add_argument(
+        '--transcript',
+        help='Append console output to this text file',
     )
     args = p.parse_args()
 
@@ -254,6 +371,24 @@ def main() -> None:
     def ntp_now() -> float:
         return system_to_ntp_time(time.time())
 
+    def shifted_ntp(seconds: float) -> float:
+        return system_to_ntp_time(time.time() + seconds)
+
+    def client_clock_start() -> float:
+        value = ns.clock_state().get('client_clock_start_ntp')
+        if value is None:
+            raise RuntimeError('client clock start is unavailable before ntpsync')
+        return value
+
+    def send_event_code(event_type: str, label: str = None):
+        if len(event_type) != 4:
+            raise ValueError('event_code requires exactly 4 characters')
+        return ns.send_event(
+            event_type=event_type,
+            label=label or event_type,
+            desc='Sent from example2.py experiment',
+        )
+
     actions = {
         'c': ('Connect socket only', connect_socket_only),
         'h': ('Connect with Query + Attention', connect_with_handshake),
@@ -264,19 +399,161 @@ def main() -> None:
         'n': ('raw NTPClockSync', lambda: send('NTPClockSync', ntp_now())()),
         'i': ('high-level ntpsync', lambda: ns.ntpsync()
               if ensure_connected() else None),
-        's': ('high-level resync', lambda: ns.resync()
+        's': ('sync return clock', lambda: ns.sync_return_clock()
               if ensure_connected() else None),
-        'S': ('high-level resync with Attention',
-              lambda: ns.resync(attention=True)
+        'S': ('sync return clock with Attention',
+              lambda: ns.sync_return_clock(attention=True)
               if ensure_connected() else None),
         'p': ('raw NTPReturnClock', lambda: send('NTPReturnClock', ntp_now())()),
         'b': ('BeginRecording', send('BeginRecording')),
         'e': ('EndRecording', send('EndRecording')),
         'v': ('EventData simple', send('EventData', make_simple_event())),
         'd': ('EventData with data', send('EventData', make_data_event())),
+        'r': ('sample NTP drift', lambda: ns.sample_drift()
+              if ensure_connected() else None),
+        'g': ('show NTP drift', lambda: print_drift(ns)),
         'o': ('show offset history', lambda: print_offsets(ns)),
+        'k': ('show clock state', lambda: print_clock_state(ns)),
         'x': ('Exit + close socket', close),
     }
+
+    named_actions = {
+        'connect': ('Connect socket only', connect_socket_only),
+        'connect_only': ('Connect socket only', connect_socket_only),
+        'handshake': ('Connect with Query + Attention', connect_with_handshake),
+        'connect_handshake': ('Connect with Query + Attention',
+                              connect_with_handshake),
+        'query': ('Query', send('Query', args.endian)),
+        'new_query': ('NewQuery', send('NewQuery')),
+        'attention': ('Attention', send('Attention')),
+        'clock_sync': ('ClockSync', lambda: send('ClockSync', clock_sync_data())()),
+        'ntp_clock_sync': ('raw NTPClockSync',
+                           lambda: send('NTPClockSync', ntp_now())()),
+        'ntp_clock_sync_start': ('NTPClockSync with client clock start',
+                                 lambda: send('NTPClockSync',
+                                              client_clock_start())()),
+        'ntpsync': ('high-level ntpsync',
+                    lambda: ns.ntpsync() if ensure_connected() else None),
+        'sync_return_clock': ('sync return clock',
+                              lambda: ns.sync_return_clock()
+                              if ensure_connected() else None),
+        'sync_return_clock_attention': ('sync return clock with Attention',
+                                        lambda: ns.sync_return_clock(
+                                            attention=True
+                                        ) if ensure_connected() else None),
+        'resync': ('sync return clock',
+                   lambda: ns.sync_return_clock()
+                   if ensure_connected() else None),
+        'resync_attention': ('sync return clock with Attention',
+                             lambda: ns.sync_return_clock(attention=True)
+                             if ensure_connected() else None),
+        'return_clock': ('raw NTPReturnClock',
+                         lambda: send('NTPReturnClock', ntp_now())()),
+        'return_clock_start': ('NTPReturnClock with client clock start',
+                               lambda: send('NTPReturnClock',
+                                            client_clock_start())()),
+        'begin': ('BeginRecording', send('BeginRecording')),
+        'begin_recording': ('BeginRecording', send('BeginRecording')),
+        'end': ('EndRecording', send('EndRecording')),
+        'end_recording': ('EndRecording', send('EndRecording')),
+        'event': ('EventData simple', send('EventData', make_simple_event())),
+        'event_data': ('EventData with data',
+                       send('EventData', make_data_event())),
+        'sample_drift': ('sample NTP drift',
+                         lambda: ns.sample_drift()
+                         if ensure_connected() else None),
+        'drift_sample': ('sample NTP drift',
+                         lambda: ns.sample_drift()
+                         if ensure_connected() else None),
+        'drift': ('show NTP drift', lambda: print_drift(ns)),
+        'drift_report': ('show NTP drift', lambda: print_drift(ns)),
+        'drift_on': ('enable drift correction',
+                     lambda: ns.set_drift_correction(True)
+                     if ensure_connected() else None),
+        'drift_off': ('disable drift correction',
+                      lambda: ns.set_drift_correction(False)
+                      if ensure_connected() else None),
+        'offsets': ('show offset history', lambda: print_offsets(ns)),
+        'clock_state': ('show clock state', lambda: print_clock_state(ns)),
+        'close': ('Exit + close socket', close),
+        'exit': ('Exit + close socket', close),
+    }
+
+    def run_experiment(path: str) -> None:
+        print(f'\nRunning experiment: {path}')
+        for lineno, command in load_experiment(path):
+            parts = command.split()
+            name = parts[0].lower()
+            label = command
+            if name == 'sleep':
+                if len(parts) != 2:
+                    print(f'Line {lineno}: sleep requires seconds')
+                    continue
+                try:
+                    seconds = float(parts[1])
+                except ValueError:
+                    print(f'Line {lineno}: invalid sleep seconds: {parts[1]!r}')
+                    continue
+                run(f'line {lineno}: sleep {seconds}', lambda s=seconds: time.sleep(s))
+                continue
+            if name == 'ntp_clock_sync_shift':
+                if len(parts) != 2:
+                    print(f'Line {lineno}: ntp_clock_sync_shift requires seconds')
+                    continue
+                try:
+                    seconds = float(parts[1])
+                except ValueError:
+                    print(f'Line {lineno}: invalid shift seconds: {parts[1]!r}')
+                    continue
+                run(
+                    f'line {lineno}: NTPClockSync shift {seconds}',
+                    lambda s=seconds: send('NTPClockSync', shifted_ntp(s))(),
+                )
+                continue
+            if name == 'event_code':
+                if len(parts) < 2:
+                    print(f'Line {lineno}: event_code requires a 4-char code')
+                    continue
+                event_type = parts[1]
+                event_label = ' '.join(parts[2:]) if len(parts) > 2 else None
+                run(
+                    f'line {lineno}: event_code {event_type}',
+                    lambda et=event_type, el=event_label: send_event_code(
+                        et, el
+                    ),
+                )
+                continue
+            if name in actions and len(name) == 1:
+                step_label, action = actions[name]
+            elif name in named_actions:
+                step_label, action = named_actions[name]
+            else:
+                print(f'Line {lineno}: unknown command: {command!r}')
+                continue
+            run(f'line {lineno}: {label} ({step_label})', action)
+
+    def run_requested_experiment() -> bool:
+        if args.experiment:
+            run_experiment(args.experiment)
+            if args.no_interactive:
+                if ns._connected:
+                    print('\nClosing socket...')
+                    try:
+                        ns.disconnect()
+                    except Exception as err:
+                        print(f'{type(err).__name__}: {_message(err)}')
+                print('\nDone.')
+                return True
+        return False
+
+    if args.transcript:
+        Path(args.transcript).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.transcript, 'a', encoding='utf-8') as transcript:
+            with redirect_stdout(Tee(sys.stdout, transcript)):
+                if run_requested_experiment():
+                    return
+    elif run_requested_experiment():
+        return
 
     try:
         while True:

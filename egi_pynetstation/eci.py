@@ -200,6 +200,60 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
         raise InvalidECIResponse(bytearr)
 
 
+def split_response_tokens(bytearr: bytes) -> list:
+    """Split a socket read into ECI response-sized byte tokens.
+
+    TCP reads can contain more than one ECI response. Net Station also
+    appears to bundle delayed NTPReturnClock timestamps with leading or
+    trailing status bytes, such as ``S + timestamp + Z``. This helper keeps
+    ``parse_response`` strict while letting callers consume the stream one
+    logical response at a time.
+    """
+    if not isinstance(bytearr, bytes):
+        raise InvalidECIResponse(bytearr)
+
+    tokens = []
+    index = 0
+    length = len(bytearr)
+    singletons = (b'Z', b'F', b'R', b'\x01')
+
+    while index < length:
+        remaining = bytearr[index:]
+        first = remaining[0:1]
+
+        if first in singletons:
+            tokens.append(first)
+            index += 1
+        elif first == b'I':
+            # Query commonly returns bare I. Keep the historical parser's
+            # two-byte identify response available when the read is exactly
+            # that shape.
+            if len(remaining) == 2:
+                tokens.append(remaining)
+                index += 2
+            else:
+                tokens.append(first)
+                index += 1
+        elif first == b'S':
+            if len(remaining) >= 9 and remaining[1:2] not in singletons:
+                tokens.append(remaining[:9])
+                index += 9
+            else:
+                tokens.append(first)
+                index += 1
+        elif len(remaining) >= 9 and remaining[8:9] == b'Z':
+            tokens.append(remaining[:9])
+            index += 9
+        elif len(remaining) >= 8:
+            tokens.append(remaining[:8])
+            index += 8
+        else:
+            tokens.append(remaining)
+            index = length
+
+    return tokens
+
+
 def package_event(
     start: float,
     duration: float,
