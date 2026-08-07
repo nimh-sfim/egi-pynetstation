@@ -116,9 +116,13 @@ def write_records(path: str, records: list) -> None:
         'ntp_offset',
         'ntp_delay',
         'sync_before_stimulus',
+        'sync_after_stimulus',
         'sync_local_time',
         'sync_result',
         'sync_error',
+        'post_sync_local_time',
+        'post_sync_result',
+        'post_sync_error',
     ]
     with open(path, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=keys, extrasaction='ignore')
@@ -169,6 +173,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        '--ntpsync-after-every',
+        type=int,
+        default=0,
+        help=(
+            'Diagnostic only: send ECI ntpsync after every Nth dot. '
+            'Use 0 to disable repeated post-stimulus ECI clock syncs.'
+        ),
+    )
+    parser.add_argument(
         '--no-drift-correction',
         action='store_true',
         help='Disable client-side NTP drift correction',
@@ -181,6 +194,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.ntpsync_every < 0:
         parser.error('--ntpsync-every must be >= 0')
+    if args.ntpsync_after_every < 0:
+        parser.error('--ntpsync-after-every must be >= 0')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     records = []
@@ -210,6 +225,11 @@ def main() -> int:
             print(
                 'Diagnostic mode: sending ECI ntpsync before every '
                 f'{args.ntpsync_every} stimulus/stimuli.'
+            )
+        if args.ntpsync_after_every:
+            print(
+                'Diagnostic mode: sending ECI ntpsync after every '
+                f'{args.ntpsync_after_every} stimulus/stimuli.'
             )
 
         sender = EventSender(ns, records)
@@ -274,6 +294,10 @@ def main() -> int:
                 'phase': 'dot_on',
                 'planned_onset': next_onset,
                 'sync_before_stimulus': sync_before_stimulus,
+                'sync_after_stimulus': (
+                    args.ntpsync_after_every > 0 and
+                    trial % args.ntpsync_after_every == 0
+                ),
                 'sync_local_time': sync_local_time,
                 'sync_result': sync_result,
                 'sync_error': sync_error,
@@ -297,6 +321,13 @@ def main() -> int:
                 dot.draw()
                 win.flip()
             win.flip()
+
+            if record['sync_after_stimulus']:
+                record['post_sync_local_time'] = time.time()
+                try:
+                    record['post_sync_result'] = repr(ns.ntpsync())
+                except Exception as err:
+                    record['post_sync_error'] = f'{type(err).__name__}: {err}'
 
             now = exp_clock.getTime()
             if now - last_sample >= args.sample_interval:

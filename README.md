@@ -188,8 +188,17 @@ python psychopy_photocell_drift.py amp \
 ```
 
 Use `--ntpsync-every 1` to sync before every dot, or omit the option for the
-normal drift-corrected path. The CSV records whether each stimulus had a sync
-immediately before it.
+normal drift-corrected path. To sync after stimuli instead:
+
+```bash
+python psychopy_photocell_drift.py amp \
+  --fullscreen \
+  --ntpsync-after-every 5 \
+  --log /Volumes/PJM/logs/photocell_ntpsync_after_every5.csv
+```
+
+The CSV records whether each stimulus had a sync immediately before it or
+after it.
 
 ## Diagnostics
 
