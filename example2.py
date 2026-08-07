@@ -39,9 +39,20 @@ def connect_with_drift_options(
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
+            drift_max_delay=args.drift_max_delay,
+            drift_window_minutes=args.drift_window_minutes,
         )
     except TypeError as err:
-        if 'drift_correction' not in str(err):
+        if not any(
+            name in str(err)
+            for name in (
+                'drift_correction',
+                'drift_min_samples',
+                'drift_min_span',
+                'drift_max_delay',
+                'drift_window_minutes',
+            )
+        ):
             raise
         print(
             'Warning: imported NetStation.connect() does not accept '
@@ -61,6 +72,11 @@ def connect_with_drift_options(
             )
         if hasattr(ns, 'set_drift_correction'):
             ns.set_drift_correction(not args.no_drift_correction)
+        if hasattr(ns, 'set_drift_model_options'):
+            ns.set_drift_model_options(
+                max_delay=args.drift_max_delay,
+                window_minutes=args.drift_window_minutes,
+            )
 
 
 def print_result(result: object, ns: NetStation = None) -> None:
@@ -154,6 +170,12 @@ def print_clock_state(ns: NetStation) -> None:
         'drift_samples',
         'drift_min_samples',
         'drift_min_span',
+        'drift_max_delay',
+        'drift_window',
+        'drift_valid_samples',
+        'drift_rejected_samples',
+        'drift_model_samples',
+        'drift_model_span',
         'drift_slope',
         'predicted_ntp_offset',
     ):
@@ -172,7 +194,10 @@ def print_drift(ns: NetStation) -> None:
         return
 
     print('\nNTP drift samples:')
-    print('idx  source        elapsed_s       offset_s       delta_s       delay_s')
+    print(
+        'idx  source        elapsed_s       offset_s       delta_s       '
+        'delay_s  status'
+    )
     first_offset = history[0]['offset']
     for idx, sample in enumerate(history):
         elapsed = sample.get('elapsed')
@@ -181,16 +206,25 @@ def print_drift(ns: NetStation) -> None:
         print(
             f'{idx:>3}  {sample["source"]:<12}  {elapsed_text}  '
             f'{sample["offset"]:>13.9f}  {delta:>12.9f}  '
-            f'{sample["delay"]:>10.6f}'
+            f'{sample["delay"]:>10.6f}  '
+            f'{sample.get("reject_reason") or "ok"}'
         )
 
     print('NTP drift estimate:')
     print(f'  correction enabled: {estimate.get("enabled")}')
     print(f'  samples: {estimate.get("samples")}')
+    print(f'  valid samples: {estimate.get("valid_samples")}')
+    print(f'  rejected samples: {estimate.get("rejected_samples")}')
+    print(f'  model samples: {estimate.get("model_samples")}')
     print(
         '  correction requirements: '
         f'{estimate.get("min_samples")} samples over '
         f'{estimate.get("min_span")} s'
+    )
+    print(
+        '  sample quality/window: '
+        f'max delay {estimate.get("max_delay")} s, '
+        f'last {estimate.get("window_minutes")} min'
     )
     slope = estimate.get('slope')
     if slope is None:
@@ -198,6 +232,7 @@ def print_drift(ns: NetStation) -> None:
     else:
         print(f'  offset slope: {slope:.12f} s/s')
         print(f'  offset drift: {slope * 1000 * 3600:.6f} ms/hour')
+        print(f'  model span: {estimate.get("model_span"):.6f} s')
         print(
             '  predicted offset now: '
             f'{estimate.get("predicted_offset"):.9f} s'
@@ -341,14 +376,26 @@ def main() -> None:
     p.add_argument(
         '--drift-min-samples',
         type=int,
-        default=4,
+        default=13,
         help='Minimum NTP samples before applying drift correction',
     )
     p.add_argument(
         '--drift-min-span',
         type=float,
-        default=90.0,
+        default=180.0,
         help='Minimum drift sampling window, in seconds',
+    )
+    p.add_argument(
+        '--drift-max-delay',
+        type=float,
+        default=0.010,
+        help='Reject NTP drift samples above this round-trip delay, in seconds',
+    )
+    p.add_argument(
+        '--drift-window-minutes',
+        type=float,
+        default=15.0,
+        help='Use only the last N minutes of valid drift samples for the model',
     )
     p.add_argument(
         '--experiment',
@@ -364,6 +411,10 @@ def main() -> None:
         help='Append console output to this text file',
     )
     args = p.parse_args()
+    if args.drift_max_delay <= 0:
+        p.error('--drift-max-delay must be positive')
+    if args.drift_window_minutes <= 0:
+        p.error('--drift-window-minutes must be positive')
 
     if args.mode == 'local':
         ip_cmd = args.ip_cmd or '127.0.0.1'
@@ -469,6 +520,23 @@ def main() -> None:
         span = current.get('min_span') if not min_span else float(min_span)
         return ns.set_drift_requirements(samples, span)
 
+    def configure_drift_model_interactive():
+        current = ns.drift_estimate()
+        max_delay = input(
+            'Maximum accepted NTP delay seconds '
+            f'[{current.get("max_delay")}]: '
+        ).strip()
+        window_minutes = input(
+            'Rolling model window minutes '
+            f'[{current.get("window_minutes")}]: '
+        ).strip()
+        delay = current.get('max_delay') if not max_delay else float(max_delay)
+        window = (
+            current.get('window_minutes') if not window_minutes
+            else float(window_minutes)
+        )
+        return ns.set_drift_model_options(delay, window)
+
     actions = {
         'c': ('Connect socket only', connect_socket_only),
         'h': ('Connect with Query + Attention', connect_with_handshake),
@@ -494,6 +562,9 @@ def main() -> None:
         'g': ('show NTP drift', lambda: print_drift(ns)),
         'G': ('configure drift window',
               lambda: configure_drift_window_interactive()
+              if ensure_connected() else None),
+        'M': ('configure drift model options',
+              lambda: configure_drift_model_interactive()
               if ensure_connected() else None),
         'o': ('show offset history', lambda: print_offsets(ns)),
         'k': ('show clock state', lambda: print_clock_state(ns)),
@@ -556,6 +627,9 @@ def main() -> None:
         'drift_off': ('disable drift correction',
                       lambda: ns.set_drift_correction(False)
                       if ensure_connected() else None),
+        'drift_model': ('configure drift model options',
+                        lambda: configure_drift_model_interactive()
+                        if ensure_connected() else None),
         'offsets': ('show offset history', lambda: print_offsets(ns)),
         'clock_state': ('show clock state', lambda: print_clock_state(ns)),
         'close': ('Exit + close socket', close),
@@ -626,6 +700,30 @@ def main() -> None:
                     f'line {lineno}: drift_window {min_samples} {min_span}',
                     lambda s=min_samples, w=min_span:
                     ns.set_drift_requirements(s, w)
+                    if ensure_connected() else None,
+                )
+                continue
+            if name == 'drift_model':
+                if len(parts) != 3:
+                    print(
+                        f'Line {lineno}: drift_model requires '
+                        'max_delay_seconds and window_minutes'
+                    )
+                    continue
+                try:
+                    max_delay = float(parts[1])
+                    window_minutes = float(parts[2])
+                except ValueError:
+                    print(
+                        f'Line {lineno}: invalid drift_model values: '
+                        f'{parts[1:]}'
+                    )
+                    continue
+                run(
+                    f'line {lineno}: drift_model {max_delay} '
+                    f'{window_minutes}',
+                    lambda d=max_delay, m=window_minutes:
+                    ns.set_drift_model_options(d, m)
                     if ensure_connected() else None,
                 )
                 continue

@@ -29,9 +29,20 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
+            drift_max_delay=args.drift_max_delay,
+            drift_window_minutes=args.drift_window_minutes,
         )
     except TypeError as err:
-        if 'drift_correction' not in str(err):
+        if not any(
+            name in str(err)
+            for name in (
+                'drift_correction',
+                'drift_min_samples',
+                'drift_min_span',
+                'drift_max_delay',
+                'drift_window_minutes',
+            )
+        ):
             raise
         print(
             'Warning: imported NetStation.connect() does not accept '
@@ -48,6 +59,11 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             )
         if hasattr(ns, 'set_drift_correction'):
             ns.set_drift_correction(not args.no_drift_correction)
+        if hasattr(ns, 'set_drift_model_options'):
+            ns.set_drift_model_options(
+                max_delay=args.drift_max_delay,
+                window_minutes=args.drift_window_minutes,
+            )
 
 
 def build_isi_sequence(duration: float) -> list:
@@ -145,6 +161,8 @@ def write_records(path: str, records: list) -> None:
         'send_error',
         'ntp_offset',
         'ntp_delay',
+        'ntp_valid',
+        'ntp_reject_reason',
         'sync_before_stimulus',
         'sync_after_stimulus',
         'sync_local_time',
@@ -178,7 +196,7 @@ def resolve_network(args):
     return args.ip_cmd, args.ip_clock, args.port
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = ArgumentParser(
         description='Run a PsychoPy white-dot photocell drift test.'
     )
@@ -190,9 +208,21 @@ def main() -> int:
     parser.add_argument('--dot-duration', type=float, default=0.100)
     parser.add_argument('--dot-radius', type=float, default=0.045)
     parser.add_argument('--dot-pos', type=float, nargs=2, default=(0.72, 0.40))
-    parser.add_argument('--sample-interval', type=float, default=30.0)
-    parser.add_argument('--drift-min-samples', type=int, default=4)
-    parser.add_argument('--drift-min-span', type=float, default=90.0)
+    parser.add_argument('--sample-interval', type=float, default=15.0)
+    parser.add_argument('--drift-min-samples', type=int, default=13)
+    parser.add_argument('--drift-min-span', type=float, default=180.0)
+    parser.add_argument(
+        '--drift-max-delay',
+        type=float,
+        default=0.010,
+        help='Reject NTP drift samples above this round-trip delay, in seconds',
+    )
+    parser.add_argument(
+        '--drift-window-minutes',
+        type=float,
+        default=15.0,
+        help='Use only the last N minutes of valid drift samples for the model',
+    )
     parser.add_argument(
         '--ntpsync-every',
         type=int,
@@ -221,11 +251,15 @@ def main() -> int:
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--error-log', help='JSON-lines ECI error log path')
     parser.add_argument('--log', help='CSV file for PsychoPy/ECI event timing')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.ntpsync_every < 0:
         parser.error('--ntpsync-every must be >= 0')
     if args.ntpsync_after_every < 0:
         parser.error('--ntpsync-after-every must be >= 0')
+    if args.drift_max_delay <= 0:
+        parser.error('--drift-max-delay must be positive')
+    if args.drift_window_minutes <= 0:
+        parser.error('--drift-window-minutes must be positive')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     records = []
@@ -289,6 +323,8 @@ def main() -> int:
                 'package_time': ns.getTime(),
                 'ntp_offset': sample.get('offset'),
                 'ntp_delay': sample.get('delay'),
+                'ntp_valid': sample.get('valid'),
+                'ntp_reject_reason': sample.get('reject_reason'),
             })
 
         record_drift_sample('drift_sample_start')

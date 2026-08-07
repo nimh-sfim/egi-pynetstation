@@ -75,9 +75,11 @@ from egi_pynetstation import NetStation
 ns = NetStation('10.10.10.42', 55513)
 ns.connect(
     ntp_ip='10.10.10.51',
-    drift_correction=True,   # default
-    drift_min_samples=4,     # default
-    drift_min_span=90.0,     # default seconds
+    drift_correction=True,       # default
+    drift_min_samples=13,        # default
+    drift_min_span=180.0,        # default seconds
+    drift_max_delay=0.010,       # default seconds
+    drift_window_minutes=15.0,   # default
 )
 
 ns.begin_rec()
@@ -111,14 +113,24 @@ ns.set_drift_correction(False)
 ns.set_drift_correction(True)
 ```
 
-### Setting the Drift Window
+### Setting the Drift Model
 
 The correction is intentionally gated so early NTP noise does not produce a
 bad extrapolation. By default, correction is not applied until there are at
-least 4 samples spanning at least 90 seconds.
+least 13 good samples spanning at least 180 seconds.
 
 ```python
-ns.set_drift_requirements(min_samples=4, min_span=90.0)
+ns.set_drift_requirements(min_samples=13, min_span=180.0)
+```
+
+The model also rejects high-delay NTP samples and fits only a rolling window
+of recent valid samples:
+
+```python
+ns.set_drift_model_options(
+    max_delay=0.010,      # reject NTP samples with >10 ms round-trip delay
+    window_minutes=15.0,  # fit using the last 15 minutes of valid samples
+)
 ```
 
 Inspect the estimate:
@@ -136,6 +148,13 @@ local elapsed time. To convert to milliseconds per hour:
 estimate = ns.drift_estimate()
 ms_per_hour = estimate['slope'] * 1000 * 3600
 ```
+
+The cache model is simple: the package stores the most recent fitted line
+(`slope`, `intercept`, sample count, and model span) and reuses it for
+`getTime()` calls. The line is recomputed only when a new NTP drift sample is
+collected or when drift settings change. All samples remain in
+`drift_history()` for auditing, but high-delay samples and samples older than
+the rolling window are excluded from the active fit.
 
 ## Important Timing Notes
 
@@ -164,6 +183,11 @@ This repository includes a timing test:
 ```bash
 python psychopy_photocell_drift.py amp \
   --fullscreen \
+  --sample-interval 15 \
+  --drift-min-samples 13 \
+  --drift-min-span 180 \
+  --drift-max-delay 0.010 \
+  --drift-window-minutes 15 \
   --log /Volumes/PJM/logs/photocell_drift.csv \
   --error-log /Volumes/PJM/logs/photocell_drift_errors.jsonl
 ```
@@ -176,6 +200,74 @@ times, send results, and NTP offset samples.
 Use the exported Net Station EVT file and a photocell channel to check whether
 the `stm+` marker-to-photocell offset stays stable across the run.
 
+For PsychoPy experiments that use this package directly, use the same
+connection-time drift settings:
+
+```python
+from egi_pynetstation import NetStation
+
+ns = NetStation('10.10.10.42', 55513)
+ns.connect(
+    ntp_ip='10.10.10.51',
+    drift_correction=True,
+    drift_min_samples=13,
+    drift_min_span=180.0,
+    drift_max_delay=0.010,
+    drift_window_minutes=15.0,
+)
+
+ns.begin_rec()
+
+# On the actual stimulus flip, capture the package timestamp. Then hand that
+# timestamp to a worker thread or queue that sends the ECI event just after the
+# frame appears, so the socket write does not delay the flip itself.
+def mark_stimulus_onset():
+    event_start = ns.getTime()
+    event_queue.put(('stm+', event_start))
+
+win.callOnFlip(mark_stimulus_onset)
+```
+
+Sample drift during black screens, fixation, or inter-trial intervals:
+
+```python
+if time_since_last_sample >= 15.0:
+    ns.sample_drift()
+```
+
+### Running From the PsychoPy GUI
+
+For Windows users, or anyone who prefers launching from PsychoPy Coder/Runner,
+use:
+
+```text
+psychopy_photocell_drift_gui.py
+```
+
+Open that file in PsychoPy and press Run. A startup dialog will ask for the
+same settings as the command-line script.
+
+For a typical amplifier run:
+
+```text
+Mode: amp
+Net Station IP: leave blank for 10.10.10.42
+NTP / amp IP: leave blank for 10.10.10.51
+ECI port: leave blank for 55513
+Fullscreen: checked
+Screen index: 0 or 1, depending on the stimulus display
+CSV log path: choose a writable path
+Error log path: choose a writable path
+NTP sample interval (s): 15
+Drift min samples: 13
+Drift min span (s): 180
+Reject NTP delay above (s): 0.010
+Keep last N minutes: 15
+```
+
+Use `custom` mode if the Net Station IP, NTP IP, or ECI port differ from the
+default amp setup.
+
 For a longer one-hour validation run:
 
 ```bash
@@ -183,17 +275,19 @@ python psychopy_photocell_drift.py amp \
   --fullscreen \
   --screen 1 \
   --duration 3600 \
-  --sample-interval 60 \
-  --drift-min-samples 6 \
-  --drift-min-span 300 \
+  --sample-interval 15 \
+  --drift-min-samples 13 \
+  --drift-min-span 180 \
+  --drift-max-delay 0.010 \
+  --drift-window-minutes 15 \
   --log /Volumes/PJM/logs/photocell_drift_1hr.csv \
   --error-log /Volumes/PJM/logs/photocell_drift_1hr_errors.jsonl
 ```
 
-This samples NTP drift once per minute and waits for at least 6 samples over
-5 minutes before applying drift correction. That keeps the early correction
-conservative while still letting the model track slow drift during the rest of
-the recording.
+This samples NTP drift every 15 seconds, waits for at least 13 valid samples
+over 3 minutes before applying drift correction, rejects NTP samples whose
+round-trip delay is above 10 ms, and fits the correction using the last
+15 minutes of valid samples.
 
 For comparison runs, the PsychoPy script can intentionally send repeated ECI
 `ntpsync()` commands before stimuli. This is diagnostic only and is not the
@@ -241,7 +335,8 @@ Useful `example2.py` experiment commands:
 ntpsync
 sample_drift
 drift_report
-drift_window 4 90
+drift_window 13 180
+drift_model 0.010 15
 drift_on
 drift_off
 event_code stm+

@@ -109,8 +109,12 @@ class NetStation(object):
         self._clock_start_history = []
         self._drift_history = []
         self._drift_correction = True
-        self._drift_min_samples = 4
-        self._drift_min_span = 90.0
+        self._drift_min_samples = 13
+        self._drift_min_span = 180.0
+        self._drift_max_delay = 0.010
+        self._drift_window = 15 * 60.0
+        self._drift_model = None
+        self._drift_model_dirty = True
         self._response_tokens = []
         self._recording_start = None
 
@@ -161,6 +165,8 @@ class NetStation(object):
         drift_correction: bool = True,
         drift_min_samples: int = None,
         drift_min_span: float = None,
+        drift_max_delay: float = None,
+        drift_window_minutes: float = None,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
@@ -174,6 +180,10 @@ class NetStation(object):
             applying drift correction
         drift_min_span: optional minimum sample window, in seconds, needed
             before applying drift correction
+        drift_max_delay: optional maximum NTP round-trip delay, in seconds,
+            for samples used by the drift model
+        drift_window_minutes: optional rolling window, in minutes, used by the
+            drift model
 
         Raises
         ------
@@ -214,6 +224,11 @@ class NetStation(object):
                     if drift_min_span is None
                     else drift_min_span
                 ),
+            )
+        if drift_max_delay is not None or drift_window_minutes is not None:
+            self.set_drift_model_options(
+                max_delay=drift_max_delay,
+                window_minutes=drift_window_minutes,
             )
         if handshake:
             self._command('Query', self._endian)
@@ -477,12 +492,21 @@ class NetStation(object):
         milliseconds per hour.
         """
         estimate = self._ntp_drift_regression()
+        valid_samples = self._valid_drift_samples(windowed=False)
+        rejected_samples = len(self._drift_history) - len(valid_samples)
         if estimate is None:
             return {
                 'enabled': self._drift_correction,
                 'samples': len(self._drift_history),
+                'valid_samples': len(valid_samples),
+                'rejected_samples': rejected_samples,
+                'model_samples': 0,
                 'min_samples': self._drift_min_samples,
                 'min_span': self._drift_min_span,
+                'max_delay': self._drift_max_delay,
+                'window': self._drift_window,
+                'window_minutes': self._drift_window / 60.0,
+                'model_cached': not self._drift_model_dirty,
                 'slope': None,
                 'intercept': None,
                 'predicted_offset': getattr(self, '_offset', None),
@@ -495,8 +519,17 @@ class NetStation(object):
         return {
             'enabled': self._drift_correction,
             'samples': len(self._drift_history),
+            'valid_samples': len(valid_samples),
+            'rejected_samples': rejected_samples,
+            'model_samples': estimate['sample_count'],
             'min_samples': self._drift_min_samples,
             'min_span': self._drift_min_span,
+            'max_delay': self._drift_max_delay,
+            'window': self._drift_window,
+            'window_minutes': self._drift_window / 60.0,
+            'model_span': estimate['span'],
+            'model_cached': not self._drift_model_dirty,
+            'model_updated_local_time': estimate['updated_local_time'],
             'slope': estimate['slope'],
             'intercept': estimate['intercept'],
             'predicted_offset': predicted,
@@ -533,9 +566,43 @@ class NetStation(object):
             raise ValueError('min_span must be non-negative')
         self._drift_min_samples = min_samples
         self._drift_min_span = min_span
+        self._drift_model_dirty = True
         return {
             'min_samples': self._drift_min_samples,
             'min_span': self._drift_min_span,
+        }
+
+    @check_connected
+    def set_drift_model_options(
+        self,
+        max_delay: float = None,
+        window_minutes: float = None,
+    ) -> dict:
+        """Set quality and rolling-window options for drift modeling.
+
+        Parameters
+        ----------
+        max_delay:
+            Maximum NTP round-trip delay, in seconds. Samples above this delay
+            remain in ``drift_history()`` for auditing, but are excluded from
+            the fitted correction.
+        window_minutes:
+            Number of recent minutes to use for the fitted model. Older valid
+            samples remain in ``drift_history()`` but do not affect prediction.
+        """
+        if max_delay is not None:
+            if max_delay <= 0:
+                raise ValueError('max_delay must be positive')
+            self._drift_max_delay = max_delay
+        if window_minutes is not None:
+            if window_minutes <= 0:
+                raise ValueError('window_minutes must be positive')
+            self._drift_window = window_minutes * 60.0
+        self._drift_model_dirty = True
+        return {
+            'max_delay': self._drift_max_delay,
+            'window': self._drift_window,
+            'window_minutes': self._drift_window / 60.0,
         }
 
     @check_connected
@@ -567,6 +634,12 @@ class NetStation(object):
             'drift_samples': len(self._drift_history),
             'drift_min_samples': self._drift_min_samples,
             'drift_min_span': self._drift_min_span,
+            'drift_max_delay': self._drift_max_delay,
+            'drift_window': self._drift_window,
+            'drift_valid_samples': drift.get('valid_samples'),
+            'drift_rejected_samples': drift.get('rejected_samples'),
+            'drift_model_samples': drift.get('model_samples'),
+            'drift_model_span': drift.get('model_span'),
             'drift_slope': drift.get('slope'),
             'predicted_ntp_offset': drift.get('predicted_offset'),
         }
@@ -594,21 +667,30 @@ class NetStation(object):
             'delay': response.delay,
             'tx_time': response.tx_time,
         }
+        sample['valid'] = response.delay <= self._drift_max_delay
+        sample['reject_reason'] = None if sample['valid'] else 'high_delay'
         self._drift_history.append(sample)
+        self._drift_model_dirty = True
         if self._debug:
             elapsed_text = 'None' if elapsed is None else f'{elapsed:.6f}'
+            valid_text = 'valid' if sample['valid'] else 'rejected=high_delay'
             print(
                 f'{cyan}NTP drift sample source={source} '
                 f'elapsed={elapsed_text} offset={response.offset:.9f} '
-                f'delay={response.delay:.9f}{reset}'
+                f'delay={response.delay:.9f} {valid_text}{reset}'
             )
         return dict(sample)
 
     def _ntp_drift_regression(self):
-        samples = [
-            sample for sample in self._drift_history
-            if sample.get('elapsed') is not None
-        ]
+        if not self._drift_model_dirty:
+            return self._drift_model
+
+        self._drift_model = self._fit_ntp_drift_regression()
+        self._drift_model_dirty = False
+        return self._drift_model
+
+    def _fit_ntp_drift_regression(self):
+        samples = self._valid_drift_samples(windowed=True)
         if len(samples) < self._drift_min_samples:
             return None
 
@@ -629,7 +711,29 @@ class NetStation(object):
         return {
             'slope': slope,
             'intercept': intercept,
+            'sample_count': len(samples),
+            'span': span,
+            'first_elapsed': samples[0]['elapsed'],
+            'last_elapsed': samples[-1]['elapsed'],
+            'updated_local_time': time.time(),
         }
+
+    def _valid_drift_samples(self, windowed: bool = True) -> list:
+        samples = [
+            sample for sample in self._drift_history
+            if (
+                sample.get('elapsed') is not None and
+                sample.get('valid', True)
+            )
+        ]
+        if not windowed or not samples:
+            return samples
+        latest_elapsed = samples[-1]['elapsed']
+        window_start = latest_elapsed - self._drift_window
+        return [
+            sample for sample in samples
+            if sample['elapsed'] >= window_start
+        ]
 
     def _predict_ntp_offset(self, elapsed: float = None):
         if elapsed is None:
@@ -639,8 +743,6 @@ class NetStation(object):
 
         estimate = self._ntp_drift_regression()
         if estimate is None:
-            if self._drift_history:
-                return self._drift_history[-1]['offset']
             return getattr(self, '_offset', None)
         # The fitted offset is amp/server NTP time minus local system time.
         # getTime() applies only the change from the initial offset.
