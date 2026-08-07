@@ -114,6 +114,8 @@ def print_clock_state(ns: NetStation) -> None:
         'ntp_offset',
         'drift_correction',
         'drift_samples',
+        'drift_min_samples',
+        'drift_min_span',
         'drift_slope',
         'predicted_ntp_offset',
     ):
@@ -147,6 +149,11 @@ def print_drift(ns: NetStation) -> None:
     print('NTP drift estimate:')
     print(f'  correction enabled: {estimate.get("enabled")}')
     print(f'  samples: {estimate.get("samples")}')
+    print(
+        '  correction requirements: '
+        f'{estimate.get("min_samples")} samples over '
+        f'{estimate.get("min_span")} s'
+    )
     slope = estimate.get('slope')
     if slope is None:
         print('  need at least two separated samples for a linear estimate')
@@ -228,6 +235,7 @@ def print_menu(connected: bool, profile: str, ip_cmd: str, port_cmd: int,
     print('e  EndRecording               v  EventData simple')
     print('d  EventData with data')
     print('r  sample NTP drift           g  show NTP drift')
+    print('G  configure drift window')
     print('o  show offset history        k  show clock state')
     print('x  Exit + close socket')
     print('?  redraw menu                Ctrl-C or Ctrl-D to quit')
@@ -389,6 +397,23 @@ def main() -> None:
             desc='Sent from example2.py experiment',
         )
 
+    def configure_drift_window_interactive():
+        current = ns.drift_estimate()
+        min_samples = input(
+            'Minimum drift samples '
+            f'[{current.get("min_samples")}]: '
+        ).strip()
+        min_span = input(
+            'Minimum drift window seconds '
+            f'[{current.get("min_span")}]: '
+        ).strip()
+        samples = (
+            current.get('min_samples') if not min_samples
+            else int(min_samples)
+        )
+        span = current.get('min_span') if not min_span else float(min_span)
+        return ns.set_drift_requirements(samples, span)
+
     actions = {
         'c': ('Connect socket only', connect_socket_only),
         'h': ('Connect with Query + Attention', connect_with_handshake),
@@ -412,6 +437,9 @@ def main() -> None:
         'r': ('sample NTP drift', lambda: ns.sample_drift()
               if ensure_connected() else None),
         'g': ('show NTP drift', lambda: print_drift(ns)),
+        'G': ('configure drift window',
+              lambda: configure_drift_window_interactive()
+              if ensure_connected() else None),
         'o': ('show offset history', lambda: print_offsets(ns)),
         'k': ('show clock state', lambda: print_clock_state(ns)),
         'x': ('Exit + close socket', close),
@@ -521,6 +549,29 @@ def main() -> None:
                     lambda et=event_type, el=event_label: send_event_code(
                         et, el
                     ),
+                )
+                continue
+            if name == 'drift_window':
+                if len(parts) != 3:
+                    print(
+                        f'Line {lineno}: drift_window requires '
+                        'min_samples and min_span_seconds'
+                    )
+                    continue
+                try:
+                    min_samples = int(parts[1])
+                    min_span = float(parts[2])
+                except ValueError:
+                    print(
+                        f'Line {lineno}: invalid drift_window values: '
+                        f'{parts[1:]}'
+                    )
+                    continue
+                run(
+                    f'line {lineno}: drift_window {min_samples} {min_span}',
+                    lambda s=min_samples, w=min_span:
+                    ns.set_drift_requirements(s, w)
+                    if ensure_connected() else None,
                 )
                 continue
             if name in actions and len(name) == 1:

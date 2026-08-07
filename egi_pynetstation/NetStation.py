@@ -111,6 +111,8 @@ class NetStation(object):
         self._clock_start_history = []
         self._drift_history = []
         self._drift_correction = False
+        self._drift_min_samples = 3
+        self._drift_min_span = 30.0
         self._response_tokens = []
         self._recording_start = None
 
@@ -439,6 +441,8 @@ class NetStation(object):
             return {
                 'enabled': self._drift_correction,
                 'samples': len(self._drift_history),
+                'min_samples': self._drift_min_samples,
+                'min_span': self._drift_min_span,
                 'slope': None,
                 'intercept': None,
                 'predicted_offset': getattr(self, '_offset', None),
@@ -451,6 +455,8 @@ class NetStation(object):
         return {
             'enabled': self._drift_correction,
             'samples': len(self._drift_history),
+            'min_samples': self._drift_min_samples,
+            'min_span': self._drift_min_span,
             'slope': estimate['slope'],
             'intercept': estimate['intercept'],
             'predicted_offset': predicted,
@@ -463,6 +469,34 @@ class NetStation(object):
         """Enable or disable drift-corrected getTime()."""
         self._drift_correction = enabled
         return self._drift_correction
+
+    @check_connected
+    def set_drift_requirements(
+        self,
+        min_samples: int = 3,
+        min_span: float = 30.0,
+    ) -> dict:
+        """Set minimum evidence needed before applying drift correction.
+
+        Parameters
+        ----------
+        min_samples:
+            Minimum number of NTP offset observations needed before fitting a
+            drift line.
+        min_span:
+            Minimum time window, in seconds, between the first and most recent
+            drift samples before the fitted correction is applied.
+        """
+        if min_samples < 2:
+            raise ValueError('min_samples must be at least 2')
+        if min_span < 0:
+            raise ValueError('min_span must be non-negative')
+        self._drift_min_samples = min_samples
+        self._drift_min_span = min_span
+        return {
+            'min_samples': self._drift_min_samples,
+            'min_span': self._drift_min_span,
+        }
 
     @check_connected
     def sample_drift(self) -> dict:
@@ -491,6 +525,8 @@ class NetStation(object):
             'ntp_offset': getattr(self, '_offset', None),
             'drift_correction': self._drift_correction,
             'drift_samples': len(self._drift_history),
+            'drift_min_samples': self._drift_min_samples,
+            'drift_min_span': self._drift_min_span,
             'drift_slope': drift.get('slope'),
             'predicted_ntp_offset': drift.get('predicted_offset'),
         }
@@ -533,7 +569,11 @@ class NetStation(object):
             sample for sample in self._drift_history
             if sample.get('elapsed') is not None
         ]
-        if len(samples) < 2:
+        if len(samples) < self._drift_min_samples:
+            return None
+
+        span = samples[-1]['elapsed'] - samples[0]['elapsed']
+        if span < self._drift_min_span:
             return None
 
         xs = [sample['elapsed'] for sample in samples]
