@@ -1,4 +1,4 @@
-#!/us/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """Abstraction of the NetStation SDK as an object"""
@@ -7,7 +7,6 @@ import binascii
 import json
 import logging
 import time
-from math import floor
 from pathlib import Path
 from typing import Union
 
@@ -18,7 +17,6 @@ from .eci import (
     package_event,
 )
 from .socket_wrapper import Socket
-from .util import format_time
 from .exceptions import *
 
 cyan = '\u001b[36;1m'
@@ -110,9 +108,9 @@ class NetStation(object):
         self._server_clock_start_ntp = None
         self._clock_start_history = []
         self._drift_history = []
-        self._drift_correction = False
-        self._drift_min_samples = 3
-        self._drift_min_span = 30.0
+        self._drift_correction = True
+        self._drift_min_samples = 4
+        self._drift_min_span = 90.0
         self._response_tokens = []
         self._recording_start = None
 
@@ -160,6 +158,9 @@ class NetStation(object):
         clock: str = 'ntp',
         ntp_ip: str = None,
         handshake: bool = True,
+        drift_correction: bool = True,
+        drift_min_samples: int = None,
+        drift_min_span: float = None,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
@@ -168,6 +169,11 @@ class NetStation(object):
         clock: either 'ntp' or 'simple', indicating clock sync method
         ntp_ip: the IP address of the NTP server on the amplifier
         handshake: send Query and Attention immediately after connecting
+        drift_correction: enable client-side drift correction for getTime()
+        drift_min_samples: optional minimum number of NTP samples needed before
+            applying drift correction
+        drift_min_span: optional minimum sample window, in seconds, needed
+            before applying drift correction
 
         Raises
         ------
@@ -195,13 +201,34 @@ class NetStation(object):
         self._socket.connect()
         self._connected = True
         self._ntp_ip = ntp_ip
+        self._drift_correction = drift_correction
+        if drift_min_samples is not None or drift_min_span is not None:
+            self.set_drift_requirements(
+                min_samples=(
+                    self._drift_min_samples
+                    if drift_min_samples is None
+                    else drift_min_samples
+                ),
+                min_span=(
+                    self._drift_min_span
+                    if drift_min_span is None
+                    else drift_min_span
+                ),
+            )
         if handshake:
             self._command('Query', self._endian)
             self._command('Attention')
 
     @check_connected
     def ntpsync(self):
-        """Perform an NTP synchronization"""
+        """Perform the ECI NTP synchronization.
+
+        This sends one ECI ``NTPClockSync`` command using the current offset
+        reported by the amplifier/Net Station NTP server. It also stores the
+        first NTP offset sample used by the client-side drift corrector.
+        Repeated ECI clock syncs during a recording can reset the local event
+        timestamp epoch and should be avoided for normal experiments.
+        """
         self._ntpsynced = True
         self._command('Attention')
         if not self._ntp_ip:
@@ -223,10 +250,6 @@ class NetStation(object):
             local_time=t,
             monotonic_time=monotonic_t,
         )
-        # TODO: Turn into a debug option
-        # print('Sent local time: ' + format_time(t))
-        # print(f'NTP offset is approx {self._offset}')
-        # print(f'Syncepoch is approx {self._syncepoch}')
         return cresponse
 
     @check_connected
@@ -286,12 +309,22 @@ class NetStation(object):
     
     @check_connected
     def getTime(self):
+        """Return the current event timestamp in seconds.
+
+        The timestamp is measured from the most recent ``ntpsync()`` using a
+        monotonic local clock. When drift correction is enabled, this method
+        adds the predicted change in NTP offset between the client computer and
+        the amplifier/Net Station NTP server. The correction is not applied
+        until the drift history satisfies ``set_drift_requirements()``.
+        """
         if self._syncepoch is None:
             raise RuntimeError('getTime is unavailable before NTP sync')
 
         if self._sync_monotonic is None:
             return time.time() - self._syncepoch
 
+        # Use monotonic time for elapsed event timestamps so wall-clock
+        # adjustments on the stimulus computer do not create timestamp jumps.
         elapsed = time.monotonic() - self._sync_monotonic
         if not self._drift_correction:
             return elapsed
@@ -317,17 +350,14 @@ class NetStation(object):
 
     @check_connected
     def begin_rec(self) -> None:
-        """Begin Recording; also performs NTP sync"""
+        """Begin recording and perform the initial ECI NTP sync."""
         if self._ntp_ip:
+            self._command('BeginRecording')
+            self._recording_start = time.time()
             self.ntpsync()
-        # TODO: verify simple clock works correctly
-        elif clock == 'simple':
-            t = floor(time.time() * 1000)
-            self._command('ClockSync', t)
-            self._syncepoch = t
+            return
 
-        self._recording_start = time.time()
-        self._command('BeginRecording')
+        raise NetStationNoNTPIP()
 
     @check_connected
     def end_rec(self) -> None:
@@ -366,6 +396,11 @@ class NetStation(object):
 
         Notes
         -----
+        The default ``start="now"`` uses ``getTime()``. When NTP drift
+        correction is enabled and enough drift samples have been collected,
+        this means event timestamps are corrected on the client side before
+        they are sent to Net Station.
+
         When using the event sender, "now" is typically very precise.
         Tests on a Windows 7 machine with PsychoPy indicate that the
         latency in real time is about 54 +/- 3 ms for a short experiment.
@@ -435,7 +470,12 @@ class NetStation(object):
         return list(self._drift_history)
 
     def drift_estimate(self) -> dict:
-        """Return the current linear NTP drift estimate."""
+        """Return the current linear NTP drift estimate.
+
+        The slope is expressed as seconds of NTP offset change per second of
+        local elapsed time. Multiply by ``1000 * 3600`` to express it as
+        milliseconds per hour.
+        """
         estimate = self._ntp_drift_regression()
         if estimate is None:
             return {
@@ -473,8 +513,8 @@ class NetStation(object):
     @check_connected
     def set_drift_requirements(
         self,
-        min_samples: int = 3,
-        min_span: float = 30.0,
+        min_samples: int = 4,
+        min_span: float = 90.0,
     ) -> dict:
         """Set minimum evidence needed before applying drift correction.
 
@@ -602,6 +642,8 @@ class NetStation(object):
             if self._drift_history:
                 return self._drift_history[-1]['offset']
             return getattr(self, '_offset', None)
+        # The fitted offset is amp/server NTP time minus local system time.
+        # getTime() applies only the change from the initial offset.
         return estimate['intercept'] + estimate['slope'] * elapsed
 
     def _update_server_clock_start(

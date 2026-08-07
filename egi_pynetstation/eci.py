@@ -221,7 +221,19 @@ def split_response_tokens(bytearr: bytes) -> list:
         remaining = bytearr[index:]
         first = remaining[0:1]
 
-        if first in singletons:
+        if first == b'S' and len(remaining) >= 9:
+            tokens.append(remaining[:9])
+            index += 9
+        elif len(remaining) >= 9 and remaining[8:9] == b'Z':
+            tokens.append(remaining[:9])
+            index += 9
+        elif len(remaining) >= 9 and remaining[8:9] == b'S':
+            tokens.append(remaining[:8])
+            index += 8
+        elif len(remaining) == 8:
+            tokens.append(remaining)
+            index += 8
+        elif first in singletons:
             tokens.append(first)
             index += 1
         elif first == b'I':
@@ -234,16 +246,6 @@ def split_response_tokens(bytearr: bytes) -> list:
             else:
                 tokens.append(first)
                 index += 1
-        elif first == b'S':
-            if len(remaining) >= 9 and remaining[1:2] not in singletons:
-                tokens.append(remaining[:9])
-                index += 9
-            else:
-                tokens.append(first)
-                index += 1
-        elif len(remaining) >= 9 and remaining[8:9] == b'Z':
-            tokens.append(remaining[:9])
-            index += 9
         elif len(remaining) >= 8:
             tokens.append(remaining[:8])
             index += 8

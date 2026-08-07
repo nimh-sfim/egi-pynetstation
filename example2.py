@@ -296,6 +296,23 @@ def main() -> None:
         help='Append JSON-lines ECI response errors to this file',
     )
     p.add_argument(
+        '--no-drift-correction',
+        action='store_true',
+        help='Disable client-side NTP drift correction',
+    )
+    p.add_argument(
+        '--drift-min-samples',
+        type=int,
+        default=4,
+        help='Minimum NTP samples before applying drift correction',
+    )
+    p.add_argument(
+        '--drift-min-span',
+        type=float,
+        default=90.0,
+        help='Minimum drift sampling window, in seconds',
+    )
+    p.add_argument(
         '--experiment',
         help='Run commands from an experiment text file before interactive mode',
     )
@@ -351,13 +368,25 @@ def main() -> None:
     def connect_socket_only() -> object:
         if ns._connected:
             return 'already connected'
-        ns.connect(ntp_ip=ip_clock, handshake=False)
+        ns.connect(
+            ntp_ip=ip_clock,
+            handshake=False,
+            drift_correction=not args.no_drift_correction,
+            drift_min_samples=args.drift_min_samples,
+            drift_min_span=args.drift_min_span,
+        )
         return True
 
     def connect_with_handshake() -> object:
         if ns._connected:
             return 'already connected'
-        ns.connect(ntp_ip=ip_clock, handshake=True)
+        ns.connect(
+            ntp_ip=ip_clock,
+            handshake=True,
+            drift_correction=not args.no_drift_correction,
+            drift_min_samples=args.drift_min_samples,
+            drift_min_span=args.drift_min_span,
+        )
         return True
 
     def close() -> object:

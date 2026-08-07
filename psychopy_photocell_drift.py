@@ -155,6 +155,11 @@ def main() -> int:
     parser.add_argument('--sample-interval', type=float, default=30.0)
     parser.add_argument('--drift-min-samples', type=int, default=4)
     parser.add_argument('--drift-min-span', type=float, default=90.0)
+    parser.add_argument(
+        '--no-drift-correction',
+        action='store_true',
+        help='Disable client-side NTP drift correction',
+    )
     parser.add_argument('--fullscreen', action='store_true')
     parser.add_argument('--screen', type=int, default=0)
     parser.add_argument('--debug', action='store_true')
@@ -177,11 +182,15 @@ def main() -> int:
             debug=args.debug,
             error_log=args.error_log,
         )
-        ns.connect(ntp_ip=ip_clock, handshake=True)
+        ns.connect(
+            ntp_ip=ip_clock,
+            handshake=True,
+            drift_correction=not args.no_drift_correction,
+            drift_min_samples=args.drift_min_samples,
+            drift_min_span=args.drift_min_span,
+        )
         ns.send_command('BeginRecording')
         ns.ntpsync()
-        ns.set_drift_requirements(args.drift_min_samples, args.drift_min_span)
-        ns.set_drift_correction(True)
 
         sender = EventSender(ns, records)
 
@@ -205,6 +214,8 @@ def main() -> int:
         last_sample = 0.0
 
         def record_drift_sample(label: str) -> None:
+            # NTP drift samples are collected between stimulus onsets. They do
+            # not send ECI clock-sync commands and should not create markers.
             sample = ns.sample_drift()
             records.append({
                 'trial': '',
@@ -232,6 +243,9 @@ def main() -> int:
             }
 
             def mark_onset(rec=record):
+                # This callback runs on the flip that makes the dot visible.
+                # Capture the package timestamp here, then let the worker
+                # thread write to the ECI socket after the frame has flipped.
                 rec['psychopy_time'] = exp_clock.getTime()
                 rec['package_time'] = ns.getTime()
                 records.append(rec)
