@@ -176,6 +176,21 @@ times, send results, and NTP offset samples.
 Use the exported Net Station EVT file and a photocell channel to check whether
 the `stm+` marker-to-photocell offset stays stable across the run.
 
+For comparison runs, the PsychoPy script can intentionally send repeated ECI
+`ntpsync()` commands before stimuli. This is diagnostic only and is not the
+recommended production timing mode:
+
+```bash
+python psychopy_photocell_drift.py amp \
+  --fullscreen \
+  --ntpsync-every 5 \
+  --log /Volumes/PJM/logs/photocell_ntpsync_every5.csv
+```
+
+Use `--ntpsync-every 1` to sync before every dot, or omit the option for the
+normal drift-corrected path. The CSV records whether each stimulus had a sync
+immediately before it.
+
 ## Diagnostics
 
 `example2.py` is an interactive ECI command sender and experiment runner. It

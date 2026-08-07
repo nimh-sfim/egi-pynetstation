@@ -115,6 +115,10 @@ def write_records(path: str, records: list) -> None:
         'send_error',
         'ntp_offset',
         'ntp_delay',
+        'sync_before_stimulus',
+        'sync_local_time',
+        'sync_result',
+        'sync_error',
     ]
     with open(path, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=keys, extrasaction='ignore')
@@ -156,6 +160,15 @@ def main() -> int:
     parser.add_argument('--drift-min-samples', type=int, default=4)
     parser.add_argument('--drift-min-span', type=float, default=90.0)
     parser.add_argument(
+        '--ntpsync-every',
+        type=int,
+        default=0,
+        help=(
+            'Diagnostic only: send ECI ntpsync before every Nth dot. '
+            'Use 0 to disable repeated ECI clock syncs.'
+        ),
+    )
+    parser.add_argument(
         '--no-drift-correction',
         action='store_true',
         help='Disable client-side NTP drift correction',
@@ -166,6 +179,8 @@ def main() -> int:
     parser.add_argument('--error-log', help='JSON-lines ECI error log path')
     parser.add_argument('--log', help='CSV file for PsychoPy/ECI event timing')
     args = parser.parse_args()
+    if args.ntpsync_every < 0:
+        parser.error('--ntpsync-every must be >= 0')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     records = []
@@ -191,6 +206,11 @@ def main() -> int:
         )
         ns.send_command('BeginRecording')
         ns.ntpsync()
+        if args.ntpsync_every:
+            print(
+                'Diagnostic mode: sending ECI ntpsync before every '
+                f'{args.ntpsync_every} stimulus/stimuli.'
+            )
 
         sender = EventSender(ns, records)
 
@@ -231,6 +251,19 @@ def main() -> int:
 
         for trial, isi in enumerate(isis, 1):
             next_onset += isi
+            sync_before_stimulus = (
+                args.ntpsync_every > 0 and
+                (trial - 1) % args.ntpsync_every == 0
+            )
+            sync_local_time = ''
+            sync_result = ''
+            sync_error = ''
+            if sync_before_stimulus:
+                sync_local_time = time.time()
+                try:
+                    sync_result = repr(ns.ntpsync())
+                except Exception as err:
+                    sync_error = f'{type(err).__name__}: {err}'
             while exp_clock.getTime() < next_onset:
                 if event.getKeys(keyList=['escape']):
                     raise KeyboardInterrupt
@@ -240,6 +273,10 @@ def main() -> int:
                 'trial': trial,
                 'phase': 'dot_on',
                 'planned_onset': next_onset,
+                'sync_before_stimulus': sync_before_stimulus,
+                'sync_local_time': sync_local_time,
+                'sync_result': sync_result,
+                'sync_error': sync_error,
             }
 
             def mark_onset(rec=record):
