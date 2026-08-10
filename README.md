@@ -352,18 +352,18 @@ python example2.py amp --no-drift-correction
 ## Drift Settings Reference
 
 These settings control the client-side drift corrector. They do not change the
-amplifier sampling rate or the EEG recording sample rate.
+amplifier sampling rate or the EEG recording sample rate. Drift sampling
+happens only when user code calls `ns.sample_drift()`.
 
-| Setting | Default | Where used | Meaning |
-| --- | ---: | --- | --- |
-| `--sample-interval` | `15` seconds | `psychopy_photocell_drift.py` only | How often the PsychoPy test calls `ns.sample_drift()`. This is the NTP sampling rate for drift tracking. |
-| `--drift-min-samples` | `13` | PsychoPy script, `example2.py`, `ns.connect()` | Minimum number of valid NTP samples required before correction is applied. |
-| `--drift-min-span` | `180` seconds | PsychoPy script, `example2.py`, `ns.connect()` | Minimum elapsed time covered by valid samples before correction is applied. |
-| `--drift-max-delay` | `0.010` seconds | PsychoPy script, `example2.py`, `ns.connect()` | Reject NTP samples whose round-trip delay is higher than this. Rejected samples stay in logs/history but do not affect the model. |
-| `--drift-window-minutes` | `15` minutes | PsychoPy script, `example2.py`, `ns.connect()` | Fit the active correction model using only this many recent minutes of valid NTP samples. Older samples stay in history but are excluded from the active fit. |
-| `--no-drift-correction` | off | PsychoPy script, `example2.py`, `ns.connect()` | Disable drift-corrected `getTime()`. NTP samples can still be logged, but timestamps use the initial sync baseline. |
+| Package setting | Default | Meaning |
+| --- | ---: | --- |
+| `drift_correction` | `True` | Enables drift-corrected `getTime()`. When disabled, timestamps use the initial sync baseline. |
+| `drift_min_samples` | `13` | Minimum number of valid NTP samples required before correction is applied. |
+| `drift_min_span` | `180.0` seconds | Minimum elapsed time covered by valid samples before correction is applied. |
+| `drift_max_delay` | `0.010` seconds | Rejects NTP samples whose round-trip delay is higher than this. Rejected samples stay in `drift_history()` but do not affect the model. |
+| `drift_window_minutes` | `15.0` minutes | Fits the active correction model using only this many recent minutes of valid NTP samples. Older samples stay in `drift_history()` but are excluded from the active fit. |
 
-Equivalent Python connection options:
+Connection options:
 
 ```python
 ns.connect(
@@ -376,21 +376,10 @@ ns.connect(
 )
 ```
 
-Equivalent runtime controls:
+Runtime controls:
 
 ```python
 ns.set_drift_correction(True)
 ns.set_drift_requirements(min_samples=13, min_span=180.0)
 ns.set_drift_model_options(max_delay=0.010, window_minutes=15.0)
-```
-
-In `example2.py` experiment files, the corresponding commands are:
-
-```text
-sample_drift
-drift_window 13 180
-drift_model 0.010 15
-drift_on
-drift_off
-drift_report
 ```
