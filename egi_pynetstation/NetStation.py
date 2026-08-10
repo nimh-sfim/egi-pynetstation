@@ -112,9 +112,11 @@ class NetStation(object):
         self._drift_min_samples = 13
         self._drift_min_span = 180.0
         self._drift_max_delay = 0.010
+        self._drift_max_residual = 0.003
         self._drift_window = 15 * 60.0
         self._drift_model = None
         self._drift_model_dirty = True
+        self._drift_active_model = None
         self._response_tokens = []
         self._recording_start = None
 
@@ -166,6 +168,7 @@ class NetStation(object):
         drift_min_samples: int = None,
         drift_min_span: float = None,
         drift_max_delay: float = None,
+        drift_max_residual: float = None,
         drift_window_minutes: float = None,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
@@ -182,8 +185,10 @@ class NetStation(object):
             before applying drift correction
         drift_max_delay: optional maximum NTP round-trip delay, in seconds,
             for samples used by the drift model
+        drift_max_residual: optional maximum absolute model residual, in
+            seconds, before a fitted drift line is rejected
         drift_window_minutes: optional rolling window, in minutes, used by the
-            drift model
+            drift model. Use 0 to fit all valid drift samples.
 
         Raises
         ------
@@ -228,6 +233,7 @@ class NetStation(object):
         if drift_max_delay is not None or drift_window_minutes is not None:
             self.set_drift_model_options(
                 max_delay=drift_max_delay,
+                max_residual=drift_max_residual,
                 window_minutes=drift_window_minutes,
             )
         if handshake:
@@ -495,6 +501,12 @@ class NetStation(object):
         valid_samples = self._valid_drift_samples(windowed=False)
         rejected_samples = len(self._drift_history) - len(valid_samples)
         if estimate is None:
+            elapsed = None
+            if self._sync_monotonic is not None:
+                elapsed = time.monotonic() - self._sync_monotonic
+            predicted = self._predict_active_ntp_offset(elapsed)
+            if predicted is None:
+                predicted = getattr(self, '_offset', None)
             return {
                 'enabled': self._drift_correction,
                 'samples': len(self._drift_history),
@@ -504,13 +516,30 @@ class NetStation(object):
                 'min_samples': self._drift_min_samples,
                 'min_span': self._drift_min_span,
                 'max_delay': self._drift_max_delay,
+                'max_residual': self._drift_max_residual,
                 'window': self._drift_window,
-                'window_minutes': self._drift_window / 60.0,
+                'window_minutes': (
+                    None if self._drift_window is None
+                    else self._drift_window / 60.0
+                ),
                 'model_cached': not self._drift_model_dirty,
                 'slope': None,
                 'intercept': None,
-                'predicted_offset': getattr(self, '_offset', None),
+                'predicted_offset': predicted,
                 'initial_offset': getattr(self, '_offset', None),
+                'elapsed': elapsed,
+                'active_slope': (
+                    None if self._drift_active_model is None
+                    else self._drift_active_model.get('slope')
+                ),
+                'active_anchor_elapsed': (
+                    None if self._drift_active_model is None
+                    else self._drift_active_model.get('anchor_elapsed')
+                ),
+                'active_anchor_offset': (
+                    None if self._drift_active_model is None
+                    else self._drift_active_model.get('anchor_offset')
+                ),
             }
         elapsed = None
         if self._sync_monotonic is not None:
@@ -525,16 +554,34 @@ class NetStation(object):
             'min_samples': self._drift_min_samples,
             'min_span': self._drift_min_span,
             'max_delay': self._drift_max_delay,
+            'max_residual': self._drift_max_residual,
             'window': self._drift_window,
-            'window_minutes': self._drift_window / 60.0,
+            'window_minutes': (
+                None if self._drift_window is None
+                else self._drift_window / 60.0
+            ),
             'model_span': estimate['span'],
             'model_cached': not self._drift_model_dirty,
             'model_updated_local_time': estimate['updated_local_time'],
+            'model_max_residual': estimate['max_residual'],
+            'model_rms_residual': estimate['rms_residual'],
             'slope': estimate['slope'],
             'intercept': estimate['intercept'],
             'predicted_offset': predicted,
             'initial_offset': getattr(self, '_offset', None),
             'elapsed': elapsed,
+            'active_slope': (
+                None if self._drift_active_model is None
+                else self._drift_active_model.get('slope')
+            ),
+            'active_anchor_elapsed': (
+                None if self._drift_active_model is None
+                else self._drift_active_model.get('anchor_elapsed')
+            ),
+            'active_anchor_offset': (
+                None if self._drift_active_model is None
+                else self._drift_active_model.get('anchor_offset')
+            ),
         }
 
     @check_connected
@@ -576,6 +623,7 @@ class NetStation(object):
     def set_drift_model_options(
         self,
         max_delay: float = None,
+        max_residual: float = None,
         window_minutes: float = None,
     ) -> dict:
         """Set quality and rolling-window options for drift modeling.
@@ -586,23 +634,40 @@ class NetStation(object):
             Maximum NTP round-trip delay, in seconds. Samples above this delay
             remain in ``drift_history()`` for auditing, but are excluded from
             the fitted correction.
+        max_residual:
+            Maximum absolute residual, in seconds, allowed for an accepted
+            drift line. Fitted lines above this threshold are rejected and the
+            last active correction continues.
         window_minutes:
-            Number of recent minutes to use for the fitted model. Older valid
-            samples remain in ``drift_history()`` but do not affect prediction.
+            Number of recent minutes to use for the fitted model. Use 0 to fit
+            all valid samples. Older valid samples remain in
+            ``drift_history()`` but do not affect prediction when a rolling
+            window is enabled.
         """
         if max_delay is not None:
             if max_delay <= 0:
                 raise ValueError('max_delay must be positive')
             self._drift_max_delay = max_delay
+        if max_residual is not None:
+            if max_residual <= 0:
+                raise ValueError('max_residual must be positive')
+            self._drift_max_residual = max_residual
         if window_minutes is not None:
-            if window_minutes <= 0:
-                raise ValueError('window_minutes must be positive')
-            self._drift_window = window_minutes * 60.0
+            if window_minutes < 0:
+                raise ValueError('window_minutes must be non-negative')
+            self._drift_window = (
+                None if window_minutes == 0
+                else window_minutes * 60.0
+            )
         self._drift_model_dirty = True
         return {
             'max_delay': self._drift_max_delay,
+            'max_residual': self._drift_max_residual,
             'window': self._drift_window,
-            'window_minutes': self._drift_window / 60.0,
+            'window_minutes': (
+                None if self._drift_window is None
+                else self._drift_window / 60.0
+            ),
         }
 
     @check_connected
@@ -635,12 +700,16 @@ class NetStation(object):
             'drift_min_samples': self._drift_min_samples,
             'drift_min_span': self._drift_min_span,
             'drift_max_delay': self._drift_max_delay,
+            'drift_max_residual': self._drift_max_residual,
             'drift_window': self._drift_window,
             'drift_valid_samples': drift.get('valid_samples'),
             'drift_rejected_samples': drift.get('rejected_samples'),
             'drift_model_samples': drift.get('model_samples'),
             'drift_model_span': drift.get('model_span'),
+            'drift_model_max_residual': drift.get('model_max_residual'),
+            'drift_model_rms_residual': drift.get('model_rms_residual'),
             'drift_slope': drift.get('slope'),
+            'active_drift_slope': drift.get('active_slope'),
             'predicted_ntp_offset': drift.get('predicted_offset'),
         }
 
@@ -708,11 +777,23 @@ class NetStation(object):
         slope = sum((x - mean_x) * (y - mean_y)
                     for x, y in zip(xs, ys)) / denom
         intercept = mean_y - slope * mean_x
+        residuals = [
+            y - (intercept + slope * x)
+            for x, y in zip(xs, ys)
+        ]
+        max_residual = max(abs(value) for value in residuals)
+        if max_residual > self._drift_max_residual:
+            return None
+        rms_residual = (
+            sum(value ** 2 for value in residuals) / len(residuals)
+        ) ** 0.5
         return {
             'slope': slope,
             'intercept': intercept,
             'sample_count': len(samples),
             'span': span,
+            'max_residual': max_residual,
+            'rms_residual': rms_residual,
             'first_elapsed': samples[0]['elapsed'],
             'last_elapsed': samples[-1]['elapsed'],
             'updated_local_time': time.time(),
@@ -726,7 +807,7 @@ class NetStation(object):
                 sample.get('valid', True)
             )
         ]
-        if not windowed or not samples:
+        if not windowed or not samples or self._drift_window is None:
             return samples
         latest_elapsed = samples[-1]['elapsed']
         window_start = latest_elapsed - self._drift_window
@@ -743,10 +824,58 @@ class NetStation(object):
 
         estimate = self._ntp_drift_regression()
         if estimate is None:
+            active_offset = self._predict_active_ntp_offset(elapsed)
+            if active_offset is not None:
+                return active_offset
             return getattr(self, '_offset', None)
-        # The fitted offset is amp/server NTP time minus local system time.
-        # getTime() applies only the change from the initial offset.
-        return estimate['intercept'] + estimate['slope'] * elapsed
+        self._activate_drift_model(estimate, elapsed)
+        return self._predict_active_ntp_offset(elapsed)
+
+    def _drift_model_id(self, estimate: dict):
+        return (
+            estimate['sample_count'],
+            estimate['first_elapsed'],
+            estimate['last_elapsed'],
+            estimate['slope'],
+            estimate['intercept'],
+        )
+
+    def _predict_active_ntp_offset(self, elapsed: float):
+        if elapsed is None:
+            return getattr(self, '_offset', None)
+        active = self._drift_active_model
+        if active is None:
+            return getattr(self, '_offset', None)
+        return (
+            active['anchor_offset'] +
+            active['slope'] * (elapsed - active['anchor_elapsed'])
+        )
+
+    def _activate_drift_model(self, estimate: dict, elapsed: float) -> None:
+        model_id = self._drift_model_id(estimate)
+        active = self._drift_active_model
+        if active is not None and active.get('model_id') == model_id:
+            return
+
+        # Preserve the timestamp mapping at the instant a new regression is
+        # accepted. New fits may change the correction slope, but never jump
+        # event timestamps by changing the intercept under an active recording.
+        anchor_offset = self._predict_active_ntp_offset(elapsed)
+        if anchor_offset is None:
+            anchor_offset = getattr(self, '_offset', None)
+        if anchor_offset is None:
+            anchor_offset = estimate['intercept'] + estimate['slope'] * elapsed
+
+        self._drift_active_model = {
+            'model_id': model_id,
+            'slope': estimate['slope'],
+            'anchor_elapsed': elapsed,
+            'anchor_offset': anchor_offset,
+            'raw_anchor_offset': (
+                estimate['intercept'] + estimate['slope'] * elapsed
+            ),
+            'activated_local_time': time.time(),
+        }
 
     def _update_server_clock_start(
         self,

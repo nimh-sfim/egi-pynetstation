@@ -40,6 +40,7 @@ def connect_with_drift_options(
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
             drift_max_delay=args.drift_max_delay,
+            drift_max_residual=args.drift_max_residual,
             drift_window_minutes=args.drift_window_minutes,
         )
     except TypeError as err:
@@ -50,6 +51,7 @@ def connect_with_drift_options(
                 'drift_min_samples',
                 'drift_min_span',
                 'drift_max_delay',
+                'drift_max_residual',
                 'drift_window_minutes',
             )
         ):
@@ -75,6 +77,7 @@ def connect_with_drift_options(
         if hasattr(ns, 'set_drift_model_options'):
             ns.set_drift_model_options(
                 max_delay=args.drift_max_delay,
+                max_residual=args.drift_max_residual,
                 window_minutes=args.drift_window_minutes,
             )
 
@@ -221,10 +224,16 @@ def print_drift(ns: NetStation) -> None:
         f'{estimate.get("min_samples")} samples over '
         f'{estimate.get("min_span")} s'
     )
+    window_minutes = estimate.get("window_minutes")
+    window_text = (
+        'all valid samples' if window_minutes is None
+        else f'last {window_minutes} min'
+    )
     print(
         '  sample quality/window: '
         f'max delay {estimate.get("max_delay")} s, '
-        f'last {estimate.get("window_minutes")} min'
+        f'max residual {estimate.get("max_residual")} s, '
+        f'{window_text}'
     )
     slope = estimate.get('slope')
     if slope is None:
@@ -232,6 +241,12 @@ def print_drift(ns: NetStation) -> None:
     else:
         print(f'  offset slope: {slope:.12f} s/s')
         print(f'  offset drift: {slope * 1000 * 3600:.6f} ms/hour')
+        active_slope = estimate.get('active_slope')
+        if active_slope is not None:
+            print(
+                '  active applied drift: '
+                f'{active_slope * 1000 * 3600:.6f} ms/hour'
+            )
         print(f'  model span: {estimate.get("model_span"):.6f} s')
         print(
             '  predicted offset now: '
@@ -392,10 +407,19 @@ def main() -> None:
         help='Reject NTP drift samples above this round-trip delay, in seconds',
     )
     p.add_argument(
+        '--drift-max-residual',
+        type=float,
+        default=0.003,
+        help='Reject NTP drift fits above this maximum residual, in seconds',
+    )
+    p.add_argument(
         '--drift-window-minutes',
         type=float,
         default=15.0,
-        help='Use only the last N minutes of valid drift samples for the model',
+        help=(
+            'Use only the last N minutes of valid drift samples for the model; '
+            '0 uses all valid samples'
+        ),
     )
     p.add_argument(
         '--experiment',
@@ -413,8 +437,10 @@ def main() -> None:
     args = p.parse_args()
     if args.drift_max_delay <= 0:
         p.error('--drift-max-delay must be positive')
-    if args.drift_window_minutes <= 0:
-        p.error('--drift-window-minutes must be positive')
+    if args.drift_max_residual <= 0:
+        p.error('--drift-max-residual must be positive')
+    if args.drift_window_minutes < 0:
+        p.error('--drift-window-minutes must be non-negative')
 
     if args.mode == 'local':
         ip_cmd = args.ip_cmd or '127.0.0.1'
@@ -526,16 +552,28 @@ def main() -> None:
             'Maximum accepted NTP delay seconds '
             f'[{current.get("max_delay")}]: '
         ).strip()
+        max_residual = input(
+            'Maximum accepted model residual seconds '
+            f'[{current.get("max_residual")}]: '
+        ).strip()
         window_minutes = input(
-            'Rolling model window minutes '
+            'Rolling model window minutes (0 = all samples) '
             f'[{current.get("window_minutes")}]: '
         ).strip()
         delay = current.get('max_delay') if not max_delay else float(max_delay)
+        residual = (
+            current.get('max_residual') if not max_residual
+            else float(max_residual)
+        )
         window = (
             current.get('window_minutes') if not window_minutes
             else float(window_minutes)
         )
-        return ns.set_drift_model_options(delay, window)
+        return ns.set_drift_model_options(
+            max_delay=delay,
+            max_residual=residual,
+            window_minutes=window,
+        )
 
     actions = {
         'c': ('Connect socket only', connect_socket_only),
@@ -704,15 +742,22 @@ def main() -> None:
                 )
                 continue
             if name == 'drift_model':
-                if len(parts) != 3:
+                if len(parts) not in (3, 4):
                     print(
                         f'Line {lineno}: drift_model requires '
-                        'max_delay_seconds and window_minutes'
+                        'max_delay_seconds, optional max_residual_seconds, '
+                        'and window_minutes '
+                        '(0 for all samples)'
                     )
                     continue
                 try:
                     max_delay = float(parts[1])
-                    window_minutes = float(parts[2])
+                    if len(parts) == 3:
+                        max_residual = args.drift_max_residual
+                        window_minutes = float(parts[2])
+                    else:
+                        max_residual = float(parts[2])
+                        window_minutes = float(parts[3])
                 except ValueError:
                     print(
                         f'Line {lineno}: invalid drift_model values: '
@@ -721,9 +766,13 @@ def main() -> None:
                     continue
                 run(
                     f'line {lineno}: drift_model {max_delay} '
-                    f'{window_minutes}',
-                    lambda d=max_delay, m=window_minutes:
-                    ns.set_drift_model_options(d, m)
+                    f'{max_residual} {window_minutes}',
+                    lambda d=max_delay, r=max_residual, m=window_minutes:
+                    ns.set_drift_model_options(
+                        max_delay=d,
+                        max_residual=r,
+                        window_minutes=m,
+                    )
                     if ensure_connected() else None,
                 )
                 continue

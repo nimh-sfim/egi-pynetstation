@@ -79,7 +79,8 @@ ns.connect(
     drift_min_samples=13,        # default
     drift_min_span=180.0,        # default seconds
     drift_max_delay=0.010,       # default seconds
-    drift_window_minutes=15.0,   # default
+    drift_max_residual=0.003,    # default seconds
+    drift_window_minutes=15.0,   # default: local rolling fit
 )
 
 ns.begin_rec()
@@ -123,12 +124,16 @@ least 13 good samples spanning at least 180 seconds.
 ns.set_drift_requirements(min_samples=13, min_span=180.0)
 ```
 
-The model also rejects high-delay NTP samples and fits only a rolling window
-of recent valid samples:
+The model rejects high-delay NTP samples. By default it fits a local rolling
+window and applies that model continuously: when a new fit is accepted, the
+timestamp baseline is anchored at the current corrected offset, so `getTime()`
+may change correction slope but not jump event timestamps. Use `0` only when
+you deliberately want one cumulative fit over all valid samples:
 
 ```python
 ns.set_drift_model_options(
     max_delay=0.010,      # reject NTP samples with >10 ms round-trip delay
+    max_residual=0.003,   # reject fits with >3 ms residual
     window_minutes=15.0,  # fit using the last 15 minutes of valid samples
 )
 ```
@@ -154,7 +159,8 @@ The cache model is simple: the package stores the most recent fitted line
 `getTime()` calls. The line is recomputed only when a new NTP drift sample is
 collected or when drift settings change. All samples remain in
 `drift_history()` for auditing, but high-delay samples and samples older than
-the rolling window are excluded from the active fit.
+the rolling window are excluded from the active fit. Set
+`window_minutes=0.0` to disable the rolling window and use all valid samples.
 
 ## Important Timing Notes
 
@@ -187,6 +193,7 @@ python psychopy_photocell_drift.py amp \
   --drift-min-samples 13 \
   --drift-min-span 180 \
   --drift-max-delay 0.010 \
+  --drift-max-residual 0.003 \
   --drift-window-minutes 15 \
   --log /Volumes/PJM/logs/photocell_drift.csv \
   --error-log /Volumes/PJM/logs/photocell_drift_errors.jsonl
@@ -213,6 +220,7 @@ ns.connect(
     drift_min_samples=13,
     drift_min_span=180.0,
     drift_max_delay=0.010,
+    drift_max_residual=0.003,
     drift_window_minutes=15.0,
 )
 
@@ -262,7 +270,8 @@ NTP sample interval (s): 15
 Drift min samples: 13
 Drift min span (s): 180
 Reject NTP delay above (s): 0.010
-Keep last N minutes: 15
+Reject drift fit residual above (s): 0.003
+Keep last N minutes (0 = all): 15
 ```
 
 Use `custom` mode if the Net Station IP, NTP IP, or ECI port differ from the
@@ -279,6 +288,7 @@ python psychopy_photocell_drift.py amp \
   --drift-min-samples 13 \
   --drift-min-span 180 \
   --drift-max-delay 0.010 \
+  --drift-max-residual 0.003 \
   --drift-window-minutes 15 \
   --log /Volumes/PJM/logs/photocell_drift_1hr.csv \
   --error-log /Volumes/PJM/logs/photocell_drift_1hr_errors.jsonl
@@ -361,7 +371,8 @@ happens only when user code calls `ns.sample_drift()`.
 | `drift_min_samples` | `13` | Minimum number of valid NTP samples required before correction is applied. |
 | `drift_min_span` | `180.0` seconds | Minimum elapsed time covered by valid samples before correction is applied. |
 | `drift_max_delay` | `0.010` seconds | Rejects NTP samples whose round-trip delay is higher than this. Rejected samples stay in `drift_history()` but do not affect the model. |
-| `drift_window_minutes` | `15.0` minutes | Fits the active correction model using only this many recent minutes of valid NTP samples. Older samples stay in `drift_history()` but are excluded from the active fit. |
+| `drift_max_residual` | `0.003` seconds | Rejects fitted drift lines whose maximum residual exceeds this threshold. The last active correction continues instead. |
+| `drift_window_minutes` | `15.0` minutes | Fits the active correction model using only this many recent minutes. Set `0.0` to use all valid samples. |
 
 Connection options:
 
@@ -372,6 +383,7 @@ ns.connect(
     drift_min_samples=13,
     drift_min_span=180.0,
     drift_max_delay=0.010,
+    drift_max_residual=0.003,
     drift_window_minutes=15.0,
 )
 ```
@@ -381,5 +393,9 @@ Runtime controls:
 ```python
 ns.set_drift_correction(True)
 ns.set_drift_requirements(min_samples=13, min_span=180.0)
-ns.set_drift_model_options(max_delay=0.010, window_minutes=15.0)
+ns.set_drift_model_options(
+    max_delay=0.010,
+    max_residual=0.003,
+    window_minutes=15.0,
+)
 ```

@@ -30,6 +30,7 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
             drift_max_delay=args.drift_max_delay,
+            drift_max_residual=args.drift_max_residual,
             drift_window_minutes=args.drift_window_minutes,
         )
     except TypeError as err:
@@ -40,6 +41,7 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
                 'drift_min_samples',
                 'drift_min_span',
                 'drift_max_delay',
+                'drift_max_residual',
                 'drift_window_minutes',
             )
         ):
@@ -62,6 +64,7 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
         if hasattr(ns, 'set_drift_model_options'):
             ns.set_drift_model_options(
                 max_delay=args.drift_max_delay,
+                max_residual=args.drift_max_residual,
                 window_minutes=args.drift_window_minutes,
             )
 
@@ -218,10 +221,19 @@ def main(argv=None) -> int:
         help='Reject NTP drift samples above this round-trip delay, in seconds',
     )
     parser.add_argument(
+        '--drift-max-residual',
+        type=float,
+        default=0.003,
+        help='Reject NTP drift fits whose maximum residual exceeds this many seconds',
+    )
+    parser.add_argument(
         '--drift-window-minutes',
         type=float,
         default=15.0,
-        help='Use only the last N minutes of valid drift samples for the model',
+        help=(
+            'Use only the last N minutes of valid drift samples for the model; '
+            '0 uses all valid samples'
+        ),
     )
     parser.add_argument(
         '--ntpsync-every',
@@ -258,8 +270,10 @@ def main(argv=None) -> int:
         parser.error('--ntpsync-after-every must be >= 0')
     if args.drift_max_delay <= 0:
         parser.error('--drift-max-delay must be positive')
-    if args.drift_window_minutes <= 0:
-        parser.error('--drift-window-minutes must be positive')
+    if args.drift_max_residual <= 0:
+        parser.error('--drift-max-residual must be positive')
+    if args.drift_window_minutes < 0:
+        parser.error('--drift-window-minutes must be non-negative')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     records = []

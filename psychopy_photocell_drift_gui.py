@@ -41,6 +41,7 @@ def build_dialog_values() -> dict:
         'drift_min_samples': 13,
         'drift_min_span_s': 180.0,
         'drift_max_delay_s': 0.010,
+        'drift_max_residual_s': 0.003,
         'drift_window_min': 15.0,
         'disable_drift_correction': False,
         'ntpsync_before_every': 0,
@@ -74,7 +75,9 @@ def show_startup_dialog() -> dict:
     dialog.addField('Drift min samples', values['drift_min_samples'])
     dialog.addField('Drift min span (s)', values['drift_min_span_s'])
     dialog.addField('Reject NTP delay above (s)', values['drift_max_delay_s'])
-    dialog.addField('Keep last N minutes', values['drift_window_min'])
+    dialog.addField('Reject drift fit residual above (s)',
+                    values['drift_max_residual_s'])
+    dialog.addField('Keep last N minutes (0 = all)', values['drift_window_min'])
     dialog.addField('Disable drift correction', values['disable_drift_correction'])
 
     dialog.addText('Diagnostic repeated ECI ntpsync')
@@ -126,6 +129,7 @@ def dialog_values_to_argv(values: dict) -> list:
     add_option(argv, '--drift-min-samples', values['drift_min_samples'])
     add_option(argv, '--drift-min-span', values['drift_min_span_s'])
     add_option(argv, '--drift-max-delay', values['drift_max_delay_s'])
+    add_option(argv, '--drift-max-residual', values['drift_max_residual_s'])
     add_option(argv, '--drift-window-minutes', values['drift_window_min'])
     add_option(argv, '--ntpsync-every', values['ntpsync_before_every'])
     add_option(argv, '--ntpsync-after-every', values['ntpsync_after_every'])
