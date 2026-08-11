@@ -84,6 +84,9 @@ docs/_build/
 .pybuilder/
 target/
 
+# Rust helper build artifacts
+ampserver_ntp_ru/target/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

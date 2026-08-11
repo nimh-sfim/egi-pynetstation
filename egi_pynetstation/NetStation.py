@@ -682,6 +682,16 @@ class NetStation(object):
             time.sleep(0.005)
         return True
 
+    def pending_events(self) -> int:
+        """Return how many asynchronous events are still waiting to be sent.
+
+        Zero in synchronous mode. A value that grows without bound means
+        the sender cannot keep up with the event rate.
+        """
+        if self._event_queue is None:
+            return 0
+        return self._event_queue.qsize()
+
     def event_errors(self) -> list:
         """Return any errors raised while sending asynchronous events.
 

@@ -3,16 +3,21 @@
 
 """PsychoPy photocell timing test for EGI NetStation drift correction.
 
-Shows a black screen with a white dot. Every dot onset queues an ECI event
-with event code ``stm+``. The event timestamp is captured on the PsychoPy
-flip callback and sent asynchronously, so the network write does not hold up
-the visual flip.
+Shows a black screen with a white dot. Every dot onset calls
+``ns.send_event()`` directly from the PsychoPy flip callback, relying on the
+package's built-in asynchronous sender to keep the network write off the
+critical path.
+
+This script deliberately uses the package's own threading rather than
+managing a worker itself, so that a run validates what real experiments
+will actually do. The key metric is ``send_call_span_ms``: how long
+``send_event()` blocks the flip callback. Run with ``--sync-events`` to
+measure the same thing with the sender disabled, for comparison.
 """
 
 import csv
-import queue
+import statistics
 import sys
-import threading
 import time
 from argparse import ArgumentParser
 from pathlib import Path
@@ -21,11 +26,12 @@ from egi_pynetstation.NetStation import NetStation
 
 
 def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
-    """Connect, using drift options when the installed package supports them."""
+    """Connect using this repository's drift and async-sender options."""
     try:
         ns.connect(
             ntp_ip=ntp_ip,
             handshake=True,
+            async_events=not args.sync_events,
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
@@ -38,53 +44,17 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_max_model_age=args.drift_max_model_age,
         )
     except TypeError as err:
-        if not any(
-            name in str(err)
-            for name in (
-                'drift_correction',
-                'drift_min_samples',
-                'drift_min_span',
-                'drift_max_delay',
-                'drift_max_residual',
-                'drift_window_minutes',
-                'drift_samples',
-                'drift_sample_spacing',
-                'drift_slew',
-                'drift_max_model_age',
-            )
-        ):
-            raise
-        print(
-            'Warning: imported NetStation.connect() does not accept '
-            'drift_correction. Falling back to the older connect() API. '
-            'Install this repository with `pip install -e .` to use the '
-            'built-in drift corrector.',
-            file=sys.stderr,
+        # Fail loudly rather than silently validating different code. The
+        # usual cause is an older copy of the package shadowing this
+        # repository; see the installation notes in README.md.
+        raise SystemExit(
+            'The imported egi_pynetstation does not support the options this '
+            'test requires, so the run would not measure what it claims to.\n'
+            f'  error: {err}\n'
+            f'  loaded from: {NetStation.__module__}\n'
+            'Install this repository with `pip install -e .` and remove any '
+            'older copy with `pip uninstall egi_pynetstation`.'
         )
-        ns.connect(ntp_ip=ntp_ip)
-        if hasattr(ns, 'set_drift_requirements'):
-            ns.set_drift_requirements(
-                args.drift_min_samples,
-                args.drift_min_span,
-            )
-        if hasattr(ns, 'set_drift_correction'):
-            ns.set_drift_correction(not args.no_drift_correction)
-        if hasattr(ns, 'set_drift_model_options'):
-            ns.set_drift_model_options(
-                max_delay=args.drift_max_delay,
-                max_residual=args.drift_max_residual,
-                window_minutes=args.drift_window_minutes,
-            )
-        if hasattr(ns, 'set_drift_sampling'):
-            ns.set_drift_sampling(
-                samples=args.drift_samples,
-                spacing=args.drift_sample_spacing,
-            )
-        if hasattr(ns, 'set_drift_stability'):
-            ns.set_drift_stability(
-                slew=args.drift_slew,
-                max_model_age=args.drift_max_model_age,
-            )
 
 
 def build_isi_sequence(duration: float) -> list:
@@ -122,7 +92,10 @@ def build_isi_sequence(duration: float) -> list:
 
 
 def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
-    """Add flat timing/correction diagnostics to a CSV record."""
+    """Add flat timing/correction diagnostics to a CSV record.
+
+    Never call this from a flip callback; it builds a full state snapshot.
+    """
     package_time = record.get('package_time')
     psychopy_time = record.get('psychopy_time')
     if isinstance(package_time, (int, float)) and isinstance(
@@ -132,8 +105,6 @@ def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
             package_time - psychopy_time
         ) * 1000.0
 
-    if not hasattr(ns, 'clock_state'):
-        return
     try:
         state = ns.clock_state()
     except Exception as err:
@@ -181,131 +152,96 @@ def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
         record[target] = value
 
 
-class EventSender:
-    """Send ECI events from a worker thread using pre-captured timestamps."""
-
-    def __init__(self, ns: NetStation, records: list):
-        self._ns = ns
-        self._records = records
-        self._queue = queue.Queue()
-        self._stop = object()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def put(self, record: dict) -> None:
-        self._queue.put(record)
-
-    def close(self) -> None:
-        self._queue.put(self._stop)
-        self._thread.join()
-
-    def join(self) -> None:
-        self._queue.join()
-
-    def _run(self) -> None:
-        while True:
-            item = self._queue.get()
-            try:
-                if item is self._stop:
-                    return
-                # Convert the flip's raw monotonic reading into a package
-                # timestamp here rather than in the flip callback.
-                if 'package_time' not in item:
-                    try:
-                        item['package_time'] = self._ns.time_at_monotonic(
-                            item['flip_monotonic_time']
-                        )
-                    except Exception as err:
-                        item['send_ok'] = False
-                        item['send_error'] = f'{type(err).__name__}: {err}'
-                        continue
-                add_clock_diagnostics(item, self._ns)
-                try:
-                    result = self._ns.send_event(
-                        start=item['package_time'],
-                        event_type='stm+',
-                        label='stm+',
-                        desc='white dot onset',
-                    )
-                except Exception as err:
-                    item['send_ok'] = False
-                    item['send_error'] = f'{type(err).__name__}: {err}'
-                else:
-                    item['send_ok'] = True
-                    item['send_result'] = repr(result)
-                item['sent_local_time'] = time.time()
-                item['sent_monotonic_time'] = time.monotonic()
-                flip_local_time = item.get('flip_local_time')
-                if isinstance(flip_local_time, (int, float)):
-                    item['send_latency_ms'] = (
-                        item['sent_local_time'] - flip_local_time
-                    ) * 1000.0
-            finally:
-                self._queue.task_done()
+CSV_COLUMNS = [
+    'trial',
+    'phase',
+    'send_mode',
+    'planned_onset',
+    'psychopy_time',
+    'package_time',
+    'package_minus_psychopy_ms',
+    'flip_local_time',
+    'flip_monotonic_time',
+    # How long send_event() blocked the flip callback. This is the metric
+    # that validates the package's asynchronous sender.
+    'send_call_span_ms',
+    'pending_events',
+    'send_result',
+    'send_error',
+    'drift_correction_ms',
+    'drift_slope_ms_per_hour',
+    'active_drift_slope_ms_per_hour',
+    'drift_samples',
+    'drift_valid_samples',
+    'drift_rejected_samples',
+    'drift_model_samples',
+    'drift_model_span_s',
+    'drift_model_max_residual_ms',
+    'drift_model_rms_residual_ms',
+    'drift_max_residual_ms',
+    'drift_window_s',
+    'drift_accepted_fits',
+    'drift_rejected_fits',
+    'drift_last_reject_reason',
+    'drift_pending_error_ms',
+    'drift_model_age_s',
+    'drift_samples_per_call',
+    'sys_mono_skew_ms',
+    'ntp_offset_raw',
+    'clock_state_error',
+    'ntp_offset',
+    'ntp_delay',
+    'ntp_valid',
+    'ntp_reject_reason',
+    'ntp_burst_size',
+    'ntp_burst_ok',
+    'ntp_burst_worst_delay',
+    'ntp_offset_mono',
+    'ntp_sample_sys_mono_skew',
+    'sync_before_stimulus',
+    'sync_after_stimulus',
+    'sync_local_time',
+    'sync_result',
+    'sync_error',
+    'post_sync_local_time',
+    'post_sync_result',
+    'post_sync_error',
+]
 
 
 def write_records(path: str, records: list) -> None:
     if not path:
         return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    keys = [
-        'trial',
-        'phase',
-        'planned_onset',
-        'psychopy_time',
-        'package_time',
-        'package_minus_psychopy_ms',
-        'flip_local_time',
-        'flip_monotonic_time',
-        'sent_local_time',
-        'sent_monotonic_time',
-        'send_latency_ms',
-        'send_ok',
-        'send_result',
-        'send_error',
-        'drift_correction_ms',
-        'drift_slope_ms_per_hour',
-        'active_drift_slope_ms_per_hour',
-        'drift_samples',
-        'drift_valid_samples',
-        'drift_rejected_samples',
-        'drift_model_samples',
-        'drift_model_span_s',
-        'drift_model_max_residual_ms',
-        'drift_model_rms_residual_ms',
-        'drift_max_residual_ms',
-        'drift_window_s',
-        'drift_accepted_fits',
-        'drift_rejected_fits',
-        'drift_last_reject_reason',
-        'drift_pending_error_ms',
-        'drift_model_age_s',
-        'drift_samples_per_call',
-        'sys_mono_skew_ms',
-        'ntp_offset_raw',
-        'clock_state_error',
-        'ntp_offset',
-        'ntp_delay',
-        'ntp_valid',
-        'ntp_reject_reason',
-        'ntp_burst_size',
-        'ntp_burst_ok',
-        'ntp_burst_worst_delay',
-        'ntp_offset_mono',
-        'ntp_sample_sys_mono_skew',
-        'sync_before_stimulus',
-        'sync_after_stimulus',
-        'sync_local_time',
-        'sync_result',
-        'sync_error',
-        'post_sync_local_time',
-        'post_sync_result',
-        'post_sync_error',
-    ]
     with open(path, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=keys, extrasaction='ignore')
+        writer = csv.DictWriter(
+            csvfile, fieldnames=CSV_COLUMNS, extrasaction='ignore'
+        )
         writer.writeheader()
         writer.writerows(records)
+
+
+def summarize_send_timing(records: list, send_mode: str) -> None:
+    """Report how long send_event() held the flip callback."""
+    spans = [
+        r['send_call_span_ms'] for r in records
+        if isinstance(r.get('send_call_span_ms'), (int, float))
+    ]
+    if not spans:
+        return
+    spans_sorted = sorted(spans)
+    pending = [
+        r['pending_events'] for r in records
+        if isinstance(r.get('pending_events'), (int, float))
+    ]
+    print(f'\nsend_event() call span in the flip callback ({send_mode} mode):')
+    print(f'  n           {len(spans)}')
+    print(f'  mean        {statistics.mean(spans) * 1000:8.1f} us')
+    print(f'  median      {statistics.median(spans) * 1000:8.1f} us')
+    print(f'  p95         {spans_sorted[int(0.95 * len(spans))] * 1000:8.1f} us')
+    print(f'  max         {max(spans) * 1000:8.1f} us')
+    if pending:
+        print(f'  queue depth max {max(pending)} (0 means the sender kept up)')
 
 
 def resolve_network(args):
@@ -326,7 +262,7 @@ def resolve_network(args):
     return args.ip_cmd, args.ip_clock, args.port
 
 
-def main(argv=None) -> int:
+def build_parser() -> ArgumentParser:
     parser = ArgumentParser(
         description='Run a PsychoPy white-dot photocell drift test.'
     )
@@ -426,6 +362,14 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        '--sync-events',
+        action='store_true',
+        help=(
+            'Disable the package asynchronous sender so send_event() writes '
+            'to the socket inline. Use to measure what the sender is worth'
+        ),
+    )
+    parser.add_argument(
         '--no-drift-correction',
         action='store_true',
         help='Disable client-side NTP drift correction',
@@ -435,6 +379,11 @@ def main(argv=None) -> int:
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--error-log', help='JSON-lines ECI error log path')
     parser.add_argument('--log', help='CSV file for PsychoPy/ECI event timing')
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.ntpsync_every < 0:
         parser.error('--ntpsync-every must be >= 0')
@@ -458,9 +407,9 @@ def main(argv=None) -> int:
         parser.error('--drift-min-pause must be non-negative')
 
     ip_cmd, ip_clock, port = resolve_network(args)
+    send_mode = 'sync' if args.sync_events else 'async'
     records = []
     ns = None
-    sender = None
     win = None
 
     try:
@@ -475,6 +424,15 @@ def main(argv=None) -> int:
         connect_with_drift_options(ns, ip_clock, args)
         ns.send_command('BeginRecording')
         ns.ntpsync()
+
+        # The package owns the drift-sampling schedule; this script owns the
+        # timing-safety window and passes the real inter-trial gap.
+        ns.configure_auto_drift(
+            enabled=True,
+            interval=args.sample_interval,
+            min_pause=args.drift_min_pause,
+        )
+        print(f'Event send mode: {send_mode}')
         if args.ntpsync_every:
             print(
                 'Diagnostic mode: sending ECI ntpsync before every '
@@ -485,8 +443,6 @@ def main(argv=None) -> int:
                 'Diagnostic mode: sending ECI ntpsync after every '
                 f'{args.ntpsync_after_every} stimulus/stimuli.'
             )
-
-        sender = EventSender(ns, records)
 
         win = visual.Window(
             fullscr=args.fullscreen,
@@ -505,11 +461,13 @@ def main(argv=None) -> int:
         exp_clock = core.MonotonicClock()
         isis = build_isi_sequence(args.duration)
         next_onset = 0.0
+        skipped = {'pause_too_short': 0}
 
         def log_drift_sample(label: str, sample: dict) -> None:
             record = {
                 'trial': '',
                 'phase': label,
+                'send_mode': send_mode,
                 'planned_onset': '',
                 'psychopy_time': exp_clock.getTime(),
                 'package_time': ns.getTime(),
@@ -526,37 +484,18 @@ def main(argv=None) -> int:
             add_clock_diagnostics(record, ns)
             records.append(record)
 
-        def record_drift_sample(label: str) -> None:
-            # NTP drift samples are collected between stimulus onsets. They do
-            # not send ECI clock-sync commands and should not create markers.
-            log_drift_sample(label, ns.sample_drift())
-
         def record_drift_sample_if_due(available_pause: float) -> None:
-            """Sample only when the ITI is long enough to absorb the burst.
-
-            The NTP burst blocks this thread for roughly
-            (samples - 1) * spacing plus the round trips. Rather than risk
-            that landing inside a short ITI -- where it would eat the gap
-            and stall the escape-key poll -- hand the package the amount of
-            idle time actually available and let it decide.
-            """
             status = ns.sample_drift_if_due(available_pause=available_pause)
             if status.get('sampled'):
                 log_drift_sample('drift_sample', status['sample'])
             elif status.get('reason') == 'pause_too_short':
                 skipped['pause_too_short'] += 1
 
-        skipped = {'pause_too_short': 0}
-        ns.configure_auto_drift(
-            enabled=True,
-            interval=args.sample_interval,
-            min_pause=args.drift_min_pause,
-        )
-
-        record_drift_sample('drift_sample_start')
+        log_drift_sample('drift_sample_start', ns.sample_drift())
 
         for trial, isi in enumerate(isis, 1):
             next_onset += isi
+
             sync_before_stimulus = (
                 args.ntpsync_every > 0 and
                 (trial - 1) % args.ntpsync_every == 0
@@ -570,6 +509,9 @@ def main(argv=None) -> int:
                     sync_result = repr(ns.ntpsync())
                 except Exception as err:
                     sync_error = f'{type(err).__name__}: {err}'
+
+            # Hold the black screen until the scheduled onset, refreshing
+            # every frame so the flip that shows the dot is on schedule.
             while exp_clock.getTime() < next_onset:
                 if event.getKeys(keyList=['escape']):
                     raise KeyboardInterrupt
@@ -578,6 +520,7 @@ def main(argv=None) -> int:
             record = {
                 'trial': trial,
                 'phase': 'dot_on',
+                'send_mode': send_mode,
                 'planned_onset': next_onset,
                 'sync_before_stimulus': sync_before_stimulus,
                 'sync_after_stimulus': (
@@ -590,18 +533,31 @@ def main(argv=None) -> int:
             }
 
             def mark_onset(rec=record):
-                # This callback runs on the flip that makes the dot visible,
-                # so it must do as little as possible. Capture raw clock
-                # readings only: no locks, no drift-model work, no
-                # diagnostics. The worker thread converts the monotonic
-                # reading into a package timestamp via time_at_monotonic(),
-                # which describes this instant rather than the instant the
-                # conversion happens.
-                rec['flip_monotonic_time'] = time.monotonic()
+                # Runs on the flip that makes the dot visible. Call
+                # send_event() straight from here -- that is the pattern
+                # this test exists to validate -- and time the call, since
+                # that span is what a real experiment pays at every onset.
+                span_start = time.monotonic()
+                try:
+                    result = ns.send_event(
+                        event_type='stm+',
+                        label='stm+',
+                        desc='white dot onset',
+                    )
+                except Exception as err:
+                    span_end = time.monotonic()
+                    rec['send_error'] = f'{type(err).__name__}: {err}'
+                else:
+                    span_end = time.monotonic()
+                    if result is not None:
+                        rec['send_result'] = repr(result)
+                rec['flip_monotonic_time'] = span_start
+                rec['send_call_span_ms'] = (span_end - span_start) * 1000.0
+                # Read a few microseconds after the flip; the system-minus-
+                # monotonic skew this feeds is stable at that scale.
                 rec['flip_local_time'] = time.time()
                 rec['psychopy_time'] = exp_clock.getTime()
-                records.append(rec)
-                sender.put(rec)
+                rec['pending_events'] = ns.pending_events()
 
             dot.draw()
             win.callOnFlip(mark_onset)
@@ -609,6 +565,8 @@ def main(argv=None) -> int:
 
             dot_off = next_onset + args.dot_duration
             while exp_clock.getTime() < dot_off:
+                if event.getKeys(keyList=['escape']):
+                    raise KeyboardInterrupt
                 dot.draw()
                 win.flip()
             win.flip()
@@ -620,8 +578,15 @@ def main(argv=None) -> int:
                 except Exception as err:
                     record['post_sync_error'] = f'{type(err).__name__}: {err}'
 
+            # Everything below here is off the critical path.
+            if 'flip_monotonic_time' in record:
+                record['package_time'] = ns.time_at_monotonic(
+                    record['flip_monotonic_time']
+                )
+            add_clock_diagnostics(record, ns)
+            records.append(record)
+
             # Idle time between the dot going off and the next dot onset.
-            # The final trial has no successor, so treat it as unbounded.
             if trial < len(isis):
                 available_pause = (
                     next_onset + isis[trial] - exp_clock.getTime()
@@ -630,20 +595,27 @@ def main(argv=None) -> int:
                 available_pause = None
             record_drift_sample_if_due(available_pause)
 
-        sender.join()
-        record_drift_sample('drift_sample_end')
+        ns.flush_events()
+        log_drift_sample('drift_sample_end', ns.sample_drift())
+
+        summarize_send_timing(records, send_mode)
         print(
-            'Drift samples skipped for short ITI:',
+            '\nDrift samples skipped for short ITI:',
             skipped['pause_too_short'],
         )
+        errors = ns.event_errors()
+        if errors:
+            print(f'WARNING: {len(errors)} asynchronous event sends failed.')
+            for item in errors[:5]:
+                print('  ', item)
+        else:
+            print('Asynchronous event send errors: none')
         print('Drift estimate:', ns.drift_estimate())
         return 0
     except KeyboardInterrupt:
         print('\nExperiment interrupted.', file=sys.stderr)
         return 130
     finally:
-        if sender is not None:
-            sender.close()
         if win is not None:
             win.close()
         if ns is not None and ns._connected:
