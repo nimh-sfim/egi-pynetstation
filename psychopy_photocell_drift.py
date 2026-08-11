@@ -32,6 +32,10 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_max_delay=args.drift_max_delay,
             drift_max_residual=args.drift_max_residual,
             drift_window_minutes=args.drift_window_minutes,
+            drift_samples=args.drift_samples,
+            drift_sample_spacing=args.drift_sample_spacing,
+            drift_slew=args.drift_slew,
+            drift_max_model_age=args.drift_max_model_age,
         )
     except TypeError as err:
         if not any(
@@ -43,6 +47,10 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
                 'drift_max_delay',
                 'drift_max_residual',
                 'drift_window_minutes',
+                'drift_samples',
+                'drift_sample_spacing',
+                'drift_slew',
+                'drift_max_model_age',
             )
         ):
             raise
@@ -66,6 +74,16 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
                 max_delay=args.drift_max_delay,
                 max_residual=args.drift_max_residual,
                 window_minutes=args.drift_window_minutes,
+            )
+        if hasattr(ns, 'set_drift_sampling'):
+            ns.set_drift_sampling(
+                samples=args.drift_samples,
+                spacing=args.drift_sample_spacing,
+            )
+        if hasattr(ns, 'set_drift_stability'):
+            ns.set_drift_stability(
+                slew=args.drift_slew,
+                max_model_age=args.drift_max_model_age,
             )
 
 
@@ -103,6 +121,66 @@ def build_isi_sequence(duration: float) -> list:
     return isis
 
 
+def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
+    """Add flat timing/correction diagnostics to a CSV record."""
+    package_time = record.get('package_time')
+    psychopy_time = record.get('psychopy_time')
+    if isinstance(package_time, (int, float)) and isinstance(
+        psychopy_time, (int, float)
+    ):
+        record['package_minus_psychopy_ms'] = (
+            package_time - psychopy_time
+        ) * 1000.0
+
+    if not hasattr(ns, 'clock_state'):
+        return
+    try:
+        state = ns.clock_state()
+    except Exception as err:
+        record['clock_state_error'] = f'{type(err).__name__}: {err}'
+        return
+
+    initial = state.get('ntp_offset')
+    predicted = state.get('predicted_ntp_offset')
+    if isinstance(initial, (int, float)) and isinstance(predicted, (int, float)):
+        record['drift_correction_ms'] = (predicted - initial) * 1000.0
+
+    slope = state.get('drift_slope')
+    if isinstance(slope, (int, float)):
+        record['drift_slope_ms_per_hour'] = slope * 1000.0 * 3600.0
+    active_slope = state.get('active_drift_slope')
+    if isinstance(active_slope, (int, float)):
+        record['active_drift_slope_ms_per_hour'] = (
+            active_slope * 1000.0 * 3600.0
+        )
+
+    for source, target in (
+        ('drift_samples', 'drift_samples'),
+        ('drift_valid_samples', 'drift_valid_samples'),
+        ('drift_rejected_samples', 'drift_rejected_samples'),
+        ('drift_model_samples', 'drift_model_samples'),
+        ('drift_model_span', 'drift_model_span_s'),
+        ('drift_model_max_residual', 'drift_model_max_residual_ms'),
+        ('drift_model_rms_residual', 'drift_model_rms_residual_ms'),
+        ('drift_max_residual', 'drift_max_residual_ms'),
+        ('drift_window', 'drift_window_s'),
+        ('drift_accepted_fits', 'drift_accepted_fits'),
+        ('drift_rejected_fits', 'drift_rejected_fits'),
+        ('drift_last_reject_reason', 'drift_last_reject_reason'),
+        ('drift_pending_error', 'drift_pending_error_ms'),
+        ('drift_model_age', 'drift_model_age_s'),
+        ('drift_samples_per_call', 'drift_samples_per_call'),
+        ('sys_mono_skew', 'sys_mono_skew_ms'),
+        ('ntp_offset_raw', 'ntp_offset_raw'),
+    ):
+        value = state.get(source)
+        if value is None:
+            continue
+        if target.endswith('_ms') and isinstance(value, (int, float)):
+            value *= 1000.0
+        record[target] = value
+
+
 class EventSender:
     """Send ECI events from a worker thread using pre-captured timestamps."""
 
@@ -130,6 +208,18 @@ class EventSender:
             try:
                 if item is self._stop:
                     return
+                # Convert the flip's raw monotonic reading into a package
+                # timestamp here rather than in the flip callback.
+                if 'package_time' not in item:
+                    try:
+                        item['package_time'] = self._ns.time_at_monotonic(
+                            item['flip_monotonic_time']
+                        )
+                    except Exception as err:
+                        item['send_ok'] = False
+                        item['send_error'] = f'{type(err).__name__}: {err}'
+                        continue
+                add_clock_diagnostics(item, self._ns)
                 try:
                     result = self._ns.send_event(
                         start=item['package_time'],
@@ -144,6 +234,12 @@ class EventSender:
                     item['send_ok'] = True
                     item['send_result'] = repr(result)
                 item['sent_local_time'] = time.time()
+                item['sent_monotonic_time'] = time.monotonic()
+                flip_local_time = item.get('flip_local_time')
+                if isinstance(flip_local_time, (int, float)):
+                    item['send_latency_ms'] = (
+                        item['sent_local_time'] - flip_local_time
+                    ) * 1000.0
             finally:
                 self._queue.task_done()
 
@@ -158,14 +254,45 @@ def write_records(path: str, records: list) -> None:
         'planned_onset',
         'psychopy_time',
         'package_time',
+        'package_minus_psychopy_ms',
+        'flip_local_time',
+        'flip_monotonic_time',
         'sent_local_time',
+        'sent_monotonic_time',
+        'send_latency_ms',
         'send_ok',
         'send_result',
         'send_error',
+        'drift_correction_ms',
+        'drift_slope_ms_per_hour',
+        'active_drift_slope_ms_per_hour',
+        'drift_samples',
+        'drift_valid_samples',
+        'drift_rejected_samples',
+        'drift_model_samples',
+        'drift_model_span_s',
+        'drift_model_max_residual_ms',
+        'drift_model_rms_residual_ms',
+        'drift_max_residual_ms',
+        'drift_window_s',
+        'drift_accepted_fits',
+        'drift_rejected_fits',
+        'drift_last_reject_reason',
+        'drift_pending_error_ms',
+        'drift_model_age_s',
+        'drift_samples_per_call',
+        'sys_mono_skew_ms',
+        'ntp_offset_raw',
+        'clock_state_error',
         'ntp_offset',
         'ntp_delay',
         'ntp_valid',
         'ntp_reject_reason',
+        'ntp_burst_size',
+        'ntp_burst_ok',
+        'ntp_burst_worst_delay',
+        'ntp_offset_mono',
+        'ntp_sample_sys_mono_skew',
         'sync_before_stimulus',
         'sync_after_stimulus',
         'sync_local_time',
@@ -224,7 +351,10 @@ def main(argv=None) -> int:
         '--drift-max-residual',
         type=float,
         default=0.003,
-        help='Reject NTP drift fits whose maximum residual exceeds this many seconds',
+        help=(
+            'Reject NTP drift fits whose maximum absolute residual exceeds '
+            'this many seconds'
+        ),
     )
     parser.add_argument(
         '--drift-window-minutes',
@@ -233,6 +363,48 @@ def main(argv=None) -> int:
         help=(
             'Use only the last N minutes of valid drift samples for the model; '
             '0 uses all valid samples'
+        ),
+    )
+    parser.add_argument(
+        '--drift-samples',
+        type=int,
+        default=4,
+        help=(
+            'NTP queries per drift sample; the lowest-delay reply is kept. '
+            'Higher values reduce offset noise at the cost of a longer pause'
+        ),
+    )
+    parser.add_argument(
+        '--drift-sample-spacing',
+        type=float,
+        default=0.05,
+        help='Seconds between NTP queries within one drift sample burst',
+    )
+    parser.add_argument(
+        '--drift-min-pause',
+        type=float,
+        default=0.35,
+        help=(
+            'Minimum idle time, in seconds, required between stimuli before '
+            'an NTP drift burst is taken; shorter gaps are skipped'
+        ),
+    )
+    parser.add_argument(
+        '--drift-slew',
+        type=float,
+        default=0.0002,
+        help=(
+            'Maximum rate, in seconds of correction per second elapsed, at '
+            'which level errors are retired; 0 applies them instantly'
+        ),
+    )
+    parser.add_argument(
+        '--drift-max-model-age',
+        type=float,
+        default=600.0,
+        help=(
+            'Stop extrapolating a fitted slope after this many seconds; '
+            '0 extrapolates without bound'
         ),
     )
     parser.add_argument(
@@ -274,6 +446,16 @@ def main(argv=None) -> int:
         parser.error('--drift-max-residual must be positive')
     if args.drift_window_minutes < 0:
         parser.error('--drift-window-minutes must be non-negative')
+    if args.drift_samples < 1:
+        parser.error('--drift-samples must be at least 1')
+    if args.drift_sample_spacing < 0:
+        parser.error('--drift-sample-spacing must be non-negative')
+    if args.drift_slew < 0:
+        parser.error('--drift-slew must be non-negative')
+    if args.drift_max_model_age < 0:
+        parser.error('--drift-max-model-age must be non-negative')
+    if args.drift_min_pause < 0:
+        parser.error('--drift-min-pause must be non-negative')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     records = []
@@ -323,13 +505,9 @@ def main(argv=None) -> int:
         exp_clock = core.MonotonicClock()
         isis = build_isi_sequence(args.duration)
         next_onset = 0.0
-        last_sample = 0.0
 
-        def record_drift_sample(label: str) -> None:
-            # NTP drift samples are collected between stimulus onsets. They do
-            # not send ECI clock-sync commands and should not create markers.
-            sample = ns.sample_drift()
-            records.append({
+        def log_drift_sample(label: str, sample: dict) -> None:
+            record = {
                 'trial': '',
                 'phase': label,
                 'planned_onset': '',
@@ -339,7 +517,41 @@ def main(argv=None) -> int:
                 'ntp_delay': sample.get('delay'),
                 'ntp_valid': sample.get('valid'),
                 'ntp_reject_reason': sample.get('reject_reason'),
-            })
+                'ntp_burst_size': sample.get('burst_size'),
+                'ntp_burst_ok': sample.get('burst_ok'),
+                'ntp_burst_worst_delay': sample.get('burst_worst_delay'),
+                'ntp_offset_mono': sample.get('offset_mono'),
+                'ntp_sample_sys_mono_skew': sample.get('sys_mono_skew'),
+            }
+            add_clock_diagnostics(record, ns)
+            records.append(record)
+
+        def record_drift_sample(label: str) -> None:
+            # NTP drift samples are collected between stimulus onsets. They do
+            # not send ECI clock-sync commands and should not create markers.
+            log_drift_sample(label, ns.sample_drift())
+
+        def record_drift_sample_if_due(available_pause: float) -> None:
+            """Sample only when the ITI is long enough to absorb the burst.
+
+            The NTP burst blocks this thread for roughly
+            (samples - 1) * spacing plus the round trips. Rather than risk
+            that landing inside a short ITI -- where it would eat the gap
+            and stall the escape-key poll -- hand the package the amount of
+            idle time actually available and let it decide.
+            """
+            status = ns.sample_drift_if_due(available_pause=available_pause)
+            if status.get('sampled'):
+                log_drift_sample('drift_sample', status['sample'])
+            elif status.get('reason') == 'pause_too_short':
+                skipped['pause_too_short'] += 1
+
+        skipped = {'pause_too_short': 0}
+        ns.configure_auto_drift(
+            enabled=True,
+            interval=args.sample_interval,
+            min_pause=args.drift_min_pause,
+        )
 
         record_drift_sample('drift_sample_start')
 
@@ -378,11 +590,16 @@ def main(argv=None) -> int:
             }
 
             def mark_onset(rec=record):
-                # This callback runs on the flip that makes the dot visible.
-                # Capture the package timestamp here, then let the worker
-                # thread write to the ECI socket after the frame has flipped.
+                # This callback runs on the flip that makes the dot visible,
+                # so it must do as little as possible. Capture raw clock
+                # readings only: no locks, no drift-model work, no
+                # diagnostics. The worker thread converts the monotonic
+                # reading into a package timestamp via time_at_monotonic(),
+                # which describes this instant rather than the instant the
+                # conversion happens.
+                rec['flip_monotonic_time'] = time.monotonic()
+                rec['flip_local_time'] = time.time()
                 rec['psychopy_time'] = exp_clock.getTime()
-                rec['package_time'] = ns.getTime()
                 records.append(rec)
                 sender.put(rec)
 
@@ -403,13 +620,22 @@ def main(argv=None) -> int:
                 except Exception as err:
                     record['post_sync_error'] = f'{type(err).__name__}: {err}'
 
-            now = exp_clock.getTime()
-            if now - last_sample >= args.sample_interval:
-                record_drift_sample('drift_sample')
-                last_sample = now
+            # Idle time between the dot going off and the next dot onset.
+            # The final trial has no successor, so treat it as unbounded.
+            if trial < len(isis):
+                available_pause = (
+                    next_onset + isis[trial] - exp_clock.getTime()
+                )
+            else:
+                available_pause = None
+            record_drift_sample_if_due(available_pause)
 
         sender.join()
         record_drift_sample('drift_sample_end')
+        print(
+            'Drift samples skipped for short ITI:',
+            skipped['pause_too_short'],
+        )
         print('Drift estimate:', ns.drift_estimate())
         return 0
     except KeyboardInterrupt:

@@ -323,7 +323,8 @@ def print_menu(connected: bool, profile: str, ip_cmd: str, port_cmd: int,
     print('e  EndRecording               v  EventData simple')
     print('d  EventData with data')
     print('r  sample NTP drift           g  show NTP drift')
-    print('G  configure drift window')
+    print('R  refit drift model          G  configure drift window')
+    print('M  configure drift model')
     print('o  show offset history        k  show clock state')
     print('x  Exit + close socket')
     print('?  redraw menu                Ctrl-C or Ctrl-D to quit')
@@ -410,7 +411,10 @@ def main() -> None:
         '--drift-max-residual',
         type=float,
         default=0.003,
-        help='Reject NTP drift fits above this maximum residual, in seconds',
+        help=(
+            'Reject NTP drift fits above this maximum absolute residual, '
+            'in seconds'
+        ),
     )
     p.add_argument(
         '--drift-window-minutes',
@@ -598,6 +602,8 @@ def main() -> None:
         'r': ('sample NTP drift', lambda: ns.sample_drift()
               if ensure_connected() else None),
         'g': ('show NTP drift', lambda: print_drift(ns)),
+        'R': ('refit drift model', lambda: ns.refresh_drift_model()
+              if ensure_connected() else None),
         'G': ('configure drift window',
               lambda: configure_drift_window_interactive()
               if ensure_connected() else None),
@@ -659,6 +665,12 @@ def main() -> None:
                          if ensure_connected() else None),
         'drift': ('show NTP drift', lambda: print_drift(ns)),
         'drift_report': ('show NTP drift', lambda: print_drift(ns)),
+        'drift_refit': ('refit drift model',
+                        lambda: ns.refresh_drift_model()
+                        if ensure_connected() else None),
+        'refresh_drift_model': ('refit drift model',
+                                lambda: ns.refresh_drift_model()
+                                if ensure_connected() else None),
         'drift_on': ('enable drift correction',
                      lambda: ns.set_drift_correction(True)
                      if ensure_connected() else None),

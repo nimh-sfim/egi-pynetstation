@@ -6,6 +6,7 @@
 import binascii
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Union
@@ -94,6 +95,15 @@ class NetStation(object):
         eci.eci: module for parsing eci commands/responses
         """
         self._socket = Socket(ipv4, port)
+        # Two locks, never held in the reverse order. _io_lock guards the
+        # socket and the response-token buffer; _clock_lock guards drift
+        # state. getTime() takes only _clock_lock, so an event send in a
+        # worker thread can never stall a timestamp read on the render
+        # thread. Where both are needed they are taken sequentially, not
+        # nested, except that _clock_lock may be taken while _io_lock is
+        # held (never the reverse).
+        self._io_lock = threading.RLock()
+        self._clock_lock = threading.RLock()
         self._connected = False
         if not (endian in allowed_endians):
             raise NetStationIllegalArgument(endian)
@@ -102,6 +112,7 @@ class NetStation(object):
         self._error_log = error_log
         self._mstime = None
         self._syncepoch = None
+        self._offset_mono = None
         self._sync_monotonic = None
         self._sync_system_time = None
         self._client_clock_start_ntp = None
@@ -114,9 +125,20 @@ class NetStation(object):
         self._drift_max_delay = 0.010
         self._drift_max_residual = 0.003
         self._drift_window = 15 * 60.0
+        self._drift_max_model_age = 600.0
+        self._drift_slew = 0.0002
+        self._drift_samples_per_call = 4
+        self._drift_sample_spacing = 0.05
         self._drift_model = None
         self._drift_model_dirty = True
         self._drift_active_model = None
+        self._drift_last_reject_reason = None
+        self._drift_rejected_fits = 0
+        self._drift_accepted_fits = 0
+        self._auto_drift_enabled = False
+        self._auto_drift_interval = 60.0
+        self._auto_drift_min_pause = 0.5
+        self._auto_drift_last_monotonic = None
         self._response_tokens = []
         self._recording_start = None
 
@@ -170,6 +192,10 @@ class NetStation(object):
         drift_max_delay: float = None,
         drift_max_residual: float = None,
         drift_window_minutes: float = None,
+        drift_samples: int = None,
+        drift_sample_spacing: float = None,
+        drift_slew: float = None,
+        drift_max_model_age: float = None,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
@@ -189,6 +215,13 @@ class NetStation(object):
             seconds, before a fitted drift line is rejected
         drift_window_minutes: optional rolling window, in minutes, used by the
             drift model. Use 0 to fit all valid drift samples.
+        drift_samples: optional number of NTP queries per drift sample; the
+            lowest-delay reply in the burst is kept
+        drift_sample_spacing: optional seconds between queries within a burst
+        drift_slew: optional maximum rate, in seconds of correction per second
+            of elapsed time, at which level errors are retired
+        drift_max_model_age: optional maximum seconds a fitted slope may be
+            extrapolated past its anchor; 0 for unbounded
 
         Raises
         ------
@@ -236,6 +269,16 @@ class NetStation(object):
                 max_residual=drift_max_residual,
                 window_minutes=drift_window_minutes,
             )
+        if drift_samples is not None or drift_sample_spacing is not None:
+            self.set_drift_sampling(
+                samples=drift_samples,
+                spacing=drift_sample_spacing,
+            )
+        if drift_slew is not None or drift_max_model_age is not None:
+            self.set_drift_stability(
+                slew=drift_slew,
+                max_model_age=drift_max_model_age,
+            )
         if handshake:
             self._command('Query', self._endian)
             self._command('Attention')
@@ -250,8 +293,6 @@ class NetStation(object):
         Repeated ECI clock syncs during a recording can reset the local event
         timestamp epoch and should be avoided for normal experiments.
         """
-        self._ntpsynced = True
-        self._command('Attention')
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
         c = NTPClient()
@@ -259,19 +300,28 @@ class NetStation(object):
         t = time.time()
         monotonic_t = time.monotonic()
         ntp_t = system_to_ntp_time(t + response.offset)
-        cresponse = self._command('NTPClockSync', ntp_t)
-        self._offset = response.offset
-        self._syncepoch = t
-        self._sync_system_time = t
-        self._sync_monotonic = monotonic_t
-        self._client_clock_start_ntp = ntp_t
-        self._record_ntp_drift_sample(
-            response,
-            source='ntpsync',
-            local_time=t,
-            monotonic_time=monotonic_t,
-        )
-        return cresponse
+        with self._io_lock:
+            self._ntpsynced = True
+            self._command('Attention')
+            cresponse = self._command('NTPClockSync', ntp_t)
+        with self._clock_lock:
+            # _offset stays in the system-clock frame for ECI/NTP timecode
+            # use. _offset_mono is the monotonic-frame reference the drift
+            # corrector and getTime() compare against; the two frames must
+            # never be mixed.
+            self._offset = response.offset
+            self._offset_mono = response.offset + (t - monotonic_t)
+            self._syncepoch = t
+            self._sync_system_time = t
+            self._sync_monotonic = monotonic_t
+            self._client_clock_start_ntp = ntp_t
+            self._record_ntp_drift_sample(
+                response,
+                source='ntpsync',
+                local_time=t,
+                monotonic_time=monotonic_t,
+            )
+            return cresponse
 
     @check_connected
     def resync(self, attention: bool = False):
@@ -299,33 +349,39 @@ class NetStation(object):
         max_followups: number of resy events to send while waiting for the
         delayed timestamp.
         """
-        if not self._ntp_ip:
-            raise NetStationNoNTPIP()
-        if self._client_clock_start_ntp is None:
-            raise RuntimeError('sync_return_clock is unavailable before NTP sync')
-        if attention:
-            self._command('Attention')
-        response = self._command('NTPReturnClock', self._client_clock_start_ntp)
-        if isinstance(response, float):
-            self._update_server_clock_start(
-                response,
-                time.time(),
-                source='return_clock',
-            )
-            return response
-
-        last_response = response
-        for _ in range(max_followups):
-            event_response = self.send_event(event_type="resy", label='resy')
-            if isinstance(event_response, float):
-                self._update_server_clock_start(
-                    event_response,
-                    time.time(),
-                    source='return_clock_followup',
+        with self._io_lock:
+            if not self._ntp_ip:
+                raise NetStationNoNTPIP()
+            if self._client_clock_start_ntp is None:
+                raise RuntimeError(
+                    'sync_return_clock is unavailable before NTP sync'
                 )
-                return event_response
-            last_response = event_response
-        return last_response
+            if attention:
+                self._command('Attention')
+            response = self._command(
+                'NTPReturnClock',
+                self._client_clock_start_ntp,
+            )
+            if isinstance(response, float):
+                self._update_server_clock_start(
+                    response,
+                    time.time(),
+                    source='return_clock',
+                )
+                return response
+
+            last_response = response
+            for _ in range(max_followups):
+                event_response = self.send_event(event_type="resy", label='resy')
+                if isinstance(event_response, float):
+                    self._update_server_clock_start(
+                        event_response,
+                        time.time(),
+                        source='return_clock_followup',
+                    )
+                    return event_response
+                last_response = event_response
+            return last_response
     
     
     @check_connected
@@ -337,24 +393,51 @@ class NetStation(object):
         adds the predicted change in NTP offset between the client computer and
         the amplifier/Net Station NTP server. The correction is not applied
         until the drift history satisfies ``set_drift_requirements()``.
+
+        See Also
+        --------
+        time_at_monotonic: convert a previously captured ``time.monotonic()``
+        reading into an event timestamp. Prefer that in a screen-flip
+        callback: capture the raw monotonic value on the critical path and
+        convert it afterwards, so no lock or model work happens near the
+        flip.
         """
-        if self._syncepoch is None:
-            raise RuntimeError('getTime is unavailable before NTP sync')
+        return self.time_at_monotonic(time.monotonic())
 
-        if self._sync_monotonic is None:
-            return time.time() - self._syncepoch
+    @check_connected
+    def time_at_monotonic(self, monotonic_time: float):
+        """Return the event timestamp for a captured monotonic reading.
 
-        # Use monotonic time for elapsed event timestamps so wall-clock
-        # adjustments on the stimulus computer do not create timestamp jumps.
-        elapsed = time.monotonic() - self._sync_monotonic
-        if not self._drift_correction:
-            return elapsed
+        Parameters
+        ----------
+        monotonic_time:
+            A value previously returned by ``time.monotonic()``.
 
-        initial_offset = getattr(self, '_offset', None)
-        predicted_offset = self._predict_ntp_offset(elapsed)
-        if initial_offset is None or predicted_offset is None:
-            return elapsed
-        return elapsed + (predicted_offset - initial_offset)
+        Notes
+        -----
+        This lets latency-critical code record ``time.monotonic()`` with no
+        locking and no drift-model work, then convert to a package
+        timestamp later, off the critical path. The resulting timestamp
+        describes the instant of capture, not the instant of conversion.
+        """
+        with self._clock_lock:
+            if self._syncepoch is None:
+                raise RuntimeError('getTime is unavailable before NTP sync')
+
+            if self._sync_monotonic is None:
+                return time.time() - self._syncepoch
+
+            # Use monotonic time for elapsed event timestamps so wall-clock
+            # adjustments on the stimulus computer do not create timestamp jumps.
+            elapsed = monotonic_time - self._sync_monotonic
+            if not self._drift_correction:
+                return elapsed
+
+            initial_offset = getattr(self, '_offset_mono', None)
+            predicted_offset = self._predict_ntp_offset(elapsed)
+            if initial_offset is None or predicted_offset is None:
+                return elapsed
+            return elapsed + (predicted_offset - initial_offset)
     
     
     @check_connected
@@ -365,26 +448,29 @@ class NetStation(object):
     @check_connected
     def disconnect(self) -> None:
         """Close the TCP/IP connection."""
-        self._command('Exit')
-        self._socket.disconnect()
-        self._connected = False
+        with self._io_lock:
+            self._command('Exit')
+            self._socket.disconnect()
+            self._connected = False
 
     @check_connected
     def begin_rec(self) -> None:
         """Begin recording and perform the initial ECI NTP sync."""
-        if self._ntp_ip:
-            self._command('BeginRecording')
-            self._recording_start = time.time()
-            self.ntpsync()
-            return
+        with self._io_lock:
+            if self._ntp_ip:
+                self._command('BeginRecording')
+                self._recording_start = time.time()
+                self.ntpsync()
+                return
 
-        raise NetStationNoNTPIP()
+            raise NetStationNoNTPIP()
 
     @check_connected
     def end_rec(self) -> None:
         """End Recording"""
-        self._command('EndRecording')
-        self._recording_start = None
+        with self._io_lock:
+            self._command('EndRecording')
+            self._recording_start = None
 
     @check_connected
     def send_event(
@@ -447,6 +533,8 @@ class NetStation(object):
         --------
         eci.eci for explanations of the internals of the packaging
         """
+        # The timestamp is resolved before the socket lock is taken, so a
+        # send in progress on another thread can never delay it.
         if start == 'now':
             start = self.getTime()
         elif isinstance(start, float):
@@ -459,7 +547,8 @@ class NetStation(object):
         data = package_event(
             start, duration, event_type, label, desc, data
         )
-        return self._command('EventData', data)
+        with self._io_lock:
+            return self._command('EventData', data)
 
     def rec_start(self) -> float:
         """Get recording start time from time.time()
@@ -484,11 +573,13 @@ class NetStation(object):
 
     def clock_offsets(self) -> list:
         """Return server clock-start observations collected by resync()."""
-        return list(self._clock_start_history)
+        with self._clock_lock:
+            return list(self._clock_start_history)
 
     def drift_history(self) -> list:
         """Return NTP offset observations used for drift correction."""
-        return list(self._drift_history)
+        with self._clock_lock:
+            return list(self._drift_history)
 
     def drift_estimate(self) -> dict:
         """Return the current linear NTP drift estimate.
@@ -497,22 +588,61 @@ class NetStation(object):
         local elapsed time. Multiply by ``1000 * 3600`` to express it as
         milliseconds per hour.
         """
-        estimate = self._ntp_drift_regression()
-        valid_samples = self._valid_drift_samples(windowed=False)
-        rejected_samples = len(self._drift_history) - len(valid_samples)
-        if estimate is None:
+        with self._clock_lock:
+            estimate = self._ntp_drift_regression()
+            valid_samples = self._valid_drift_samples(windowed=False)
+            rejected_samples = len(self._drift_history) - len(valid_samples)
+            if estimate is None:
+                elapsed = None
+                if self._sync_monotonic is not None:
+                    elapsed = time.monotonic() - self._sync_monotonic
+                predicted = self._predict_active_ntp_offset(elapsed)
+                if predicted is None:
+                    predicted = getattr(self, '_offset_mono', None)
+                return {
+                    'enabled': self._drift_correction,
+                    'samples': len(self._drift_history),
+                    'valid_samples': len(valid_samples),
+                    'rejected_samples': rejected_samples,
+                    'model_samples': 0,
+                    'min_samples': self._drift_min_samples,
+                    'min_span': self._drift_min_span,
+                    'max_delay': self._drift_max_delay,
+                    'max_residual': self._drift_max_residual,
+                    'window': self._drift_window,
+                    'window_minutes': (
+                        None if self._drift_window is None
+                        else self._drift_window / 60.0
+                    ),
+                    'model_cached': not self._drift_model_dirty,
+                    'slope': None,
+                    'intercept': None,
+                    'predicted_offset': predicted,
+                    'initial_offset': getattr(self, '_offset_mono', None),
+                    'elapsed': elapsed,
+                    'active_slope': (
+                        None if self._drift_active_model is None
+                        else self._drift_active_model.get('slope')
+                    ),
+                    'active_anchor_elapsed': (
+                        None if self._drift_active_model is None
+                        else self._drift_active_model.get('anchor_elapsed')
+                    ),
+                    'active_anchor_offset': (
+                        None if self._drift_active_model is None
+                        else self._drift_active_model.get('anchor_offset')
+                    ),
+                }
             elapsed = None
             if self._sync_monotonic is not None:
                 elapsed = time.monotonic() - self._sync_monotonic
-            predicted = self._predict_active_ntp_offset(elapsed)
-            if predicted is None:
-                predicted = getattr(self, '_offset', None)
+            predicted = self._predict_ntp_offset(elapsed)
             return {
                 'enabled': self._drift_correction,
                 'samples': len(self._drift_history),
                 'valid_samples': len(valid_samples),
                 'rejected_samples': rejected_samples,
-                'model_samples': 0,
+                'model_samples': estimate['sample_count'],
                 'min_samples': self._drift_min_samples,
                 'min_span': self._drift_min_span,
                 'max_delay': self._drift_max_delay,
@@ -522,11 +652,15 @@ class NetStation(object):
                     None if self._drift_window is None
                     else self._drift_window / 60.0
                 ),
+                'model_span': estimate['span'],
                 'model_cached': not self._drift_model_dirty,
-                'slope': None,
-                'intercept': None,
+                'model_updated_local_time': estimate['updated_local_time'],
+                'model_max_residual': estimate['max_residual'],
+                'model_rms_residual': estimate['rms_residual'],
+                'slope': estimate['slope'],
+                'intercept': estimate['intercept'],
                 'predicted_offset': predicted,
-                'initial_offset': getattr(self, '_offset', None),
+                'initial_offset': getattr(self, '_offset_mono', None),
                 'elapsed': elapsed,
                 'active_slope': (
                     None if self._drift_active_model is None
@@ -541,54 +675,13 @@ class NetStation(object):
                     else self._drift_active_model.get('anchor_offset')
                 ),
             }
-        elapsed = None
-        if self._sync_monotonic is not None:
-            elapsed = time.monotonic() - self._sync_monotonic
-        predicted = self._predict_ntp_offset(elapsed)
-        return {
-            'enabled': self._drift_correction,
-            'samples': len(self._drift_history),
-            'valid_samples': len(valid_samples),
-            'rejected_samples': rejected_samples,
-            'model_samples': estimate['sample_count'],
-            'min_samples': self._drift_min_samples,
-            'min_span': self._drift_min_span,
-            'max_delay': self._drift_max_delay,
-            'max_residual': self._drift_max_residual,
-            'window': self._drift_window,
-            'window_minutes': (
-                None if self._drift_window is None
-                else self._drift_window / 60.0
-            ),
-            'model_span': estimate['span'],
-            'model_cached': not self._drift_model_dirty,
-            'model_updated_local_time': estimate['updated_local_time'],
-            'model_max_residual': estimate['max_residual'],
-            'model_rms_residual': estimate['rms_residual'],
-            'slope': estimate['slope'],
-            'intercept': estimate['intercept'],
-            'predicted_offset': predicted,
-            'initial_offset': getattr(self, '_offset', None),
-            'elapsed': elapsed,
-            'active_slope': (
-                None if self._drift_active_model is None
-                else self._drift_active_model.get('slope')
-            ),
-            'active_anchor_elapsed': (
-                None if self._drift_active_model is None
-                else self._drift_active_model.get('anchor_elapsed')
-            ),
-            'active_anchor_offset': (
-                None if self._drift_active_model is None
-                else self._drift_active_model.get('anchor_offset')
-            ),
-        }
 
     @check_connected
     def set_drift_correction(self, enabled: bool = True) -> bool:
         """Enable or disable drift-corrected getTime()."""
-        self._drift_correction = enabled
-        return self._drift_correction
+        with self._clock_lock:
+            self._drift_correction = enabled
+            return self._drift_correction
 
     @check_connected
     def set_drift_requirements(
@@ -611,13 +704,14 @@ class NetStation(object):
             raise ValueError('min_samples must be at least 2')
         if min_span < 0:
             raise ValueError('min_span must be non-negative')
-        self._drift_min_samples = min_samples
-        self._drift_min_span = min_span
-        self._drift_model_dirty = True
-        return {
-            'min_samples': self._drift_min_samples,
-            'min_span': self._drift_min_span,
-        }
+        with self._clock_lock:
+            self._drift_min_samples = min_samples
+            self._drift_min_span = min_span
+            self._drift_model_dirty = True
+            return {
+                'min_samples': self._drift_min_samples,
+                'min_span': self._drift_min_span,
+            }
 
     @check_connected
     def set_drift_model_options(
@@ -644,74 +738,333 @@ class NetStation(object):
             ``drift_history()`` but do not affect prediction when a rolling
             window is enabled.
         """
-        if max_delay is not None:
-            if max_delay <= 0:
-                raise ValueError('max_delay must be positive')
-            self._drift_max_delay = max_delay
-        if max_residual is not None:
-            if max_residual <= 0:
-                raise ValueError('max_residual must be positive')
-            self._drift_max_residual = max_residual
-        if window_minutes is not None:
-            if window_minutes < 0:
-                raise ValueError('window_minutes must be non-negative')
-            self._drift_window = (
-                None if window_minutes == 0
-                else window_minutes * 60.0
-            )
-        self._drift_model_dirty = True
-        return {
-            'max_delay': self._drift_max_delay,
-            'max_residual': self._drift_max_residual,
-            'window': self._drift_window,
-            'window_minutes': (
-                None if self._drift_window is None
-                else self._drift_window / 60.0
-            ),
-        }
+        with self._clock_lock:
+            if max_delay is not None:
+                if max_delay <= 0:
+                    raise ValueError('max_delay must be positive')
+                self._drift_max_delay = max_delay
+            if max_residual is not None:
+                if max_residual <= 0:
+                    raise ValueError('max_residual must be positive')
+                self._drift_max_residual = max_residual
+            if window_minutes is not None:
+                if window_minutes < 0:
+                    raise ValueError('window_minutes must be non-negative')
+                self._drift_window = (
+                    None if window_minutes == 0
+                    else window_minutes * 60.0
+                )
+            self._drift_model_dirty = True
+            return {
+                'max_delay': self._drift_max_delay,
+                'max_residual': self._drift_max_residual,
+                'window': self._drift_window,
+                'window_minutes': (
+                    None if self._drift_window is None
+                    else self._drift_window / 60.0
+                ),
+            }
 
     @check_connected
-    def sample_drift(self) -> dict:
+    def set_drift_sampling(
+        self,
+        samples: int = None,
+        spacing: float = None,
+    ) -> dict:
+        """Set the default NTP burst size used by ``sample_drift()``.
+
+        Parameters
+        ----------
+        samples:
+            Number of NTP queries per drift sample. The lowest-delay reply
+            is kept. Values of 4 to 8 substantially reduce offset noise for
+            a cost of a few tens of milliseconds per sample.
+        spacing:
+            Seconds between queries inside one burst.
+        """
+        with self._clock_lock:
+            if samples is not None:
+                if samples < 1:
+                    raise ValueError('samples must be at least 1')
+                self._drift_samples_per_call = samples
+            if spacing is not None:
+                if spacing < 0:
+                    raise ValueError('spacing must be non-negative')
+                self._drift_sample_spacing = spacing
+            return {
+                'samples': self._drift_samples_per_call,
+                'spacing': self._drift_sample_spacing,
+            }
+
+    @check_connected
+    def configure_auto_drift(
+        self,
+        enabled: bool = True,
+        interval: float = None,
+        min_pause: float = None,
+    ) -> dict:
+        """Configure the schedule used by ``sample_drift_if_due()``.
+
+        Parameters
+        ----------
+        enabled:
+            Whether ``sample_drift_if_due()`` may take samples at all.
+        interval:
+            Target seconds between drift samples.
+        min_pause:
+            Minimum idle time, in seconds, an experiment must be able to
+            offer before a sample is taken.
+        """
+        with self._clock_lock:
+            self._auto_drift_enabled = enabled
+            if interval is not None:
+                if interval <= 0:
+                    raise ValueError('interval must be positive')
+                self._auto_drift_interval = interval
+            if min_pause is not None:
+                if min_pause < 0:
+                    raise ValueError('min_pause must be non-negative')
+                self._auto_drift_min_pause = min_pause
+            return {
+                'enabled': self._auto_drift_enabled,
+                'interval': self._auto_drift_interval,
+                'min_pause': self._auto_drift_min_pause,
+            }
+
+    @check_connected
+    def set_drift_stability(
+        self,
+        slew: float = None,
+        max_model_age: float = None,
+    ) -> dict:
+        """Tune how the corrector tracks the measured NTP offset level.
+
+        Parameters
+        ----------
+        slew:
+            Maximum rate, in seconds of correction per second of elapsed
+            time, at which an outstanding level error is retired. This
+            bounds how fast the applied correction may move, so a new fit
+            never steps event timestamps. Use 0 to apply level corrections
+            instantly.
+        max_model_age:
+            Maximum seconds a fitted slope may be extrapolated after its
+            anchor. Past this age the correction holds its last value
+            instead of extrapolating an increasingly stale rate. Use 0 for
+            unbounded extrapolation.
+        """
+        with self._clock_lock:
+            if slew is not None:
+                if slew < 0:
+                    raise ValueError('slew must be non-negative')
+                self._drift_slew = slew
+                if self._drift_active_model is not None:
+                    self._drift_active_model['slew'] = slew
+            if max_model_age is not None:
+                if max_model_age < 0:
+                    raise ValueError('max_model_age must be non-negative')
+                self._drift_max_model_age = (
+                    None if max_model_age == 0 else max_model_age
+                )
+            return {
+                'slew': self._drift_slew,
+                'max_model_age': self._drift_max_model_age,
+            }
+
+    @check_connected
+    def refresh_drift_model(self) -> dict:
+        """Force the NTP drift model to refit from current samples.
+
+        This does not query NTP and does not send any ECI clock-sync command.
+        It only invalidates the cached fit, recomputes it from the current
+        valid/windowed drift samples, and activates the accepted model
+        continuously at the current elapsed time. If the refit fails the
+        current active correction, if any, continues.
+        """
+        with self._clock_lock:
+            self._drift_model_dirty = True
+            elapsed = None
+            if self._sync_monotonic is not None:
+                elapsed = time.monotonic() - self._sync_monotonic
+            estimate = self._ntp_drift_regression()
+            if estimate is not None:
+                self._activate_drift_model(estimate, elapsed)
+            return self.drift_estimate()
+
+    def _query_ntp_best_of(self, samples: int, spacing: float):
+        """Query NTP several times quickly and keep the lowest-delay reply.
+
+        NTP offset error is dominated by path asymmetry, and asymmetry
+        tracks round-trip delay: the fastest reply in a short burst is the
+        most trustworthy one. Selecting the minimum-delay reply is far more
+        effective than averaging the burst, because averaging folds the bad
+        replies back in. Reducing per-sample offset noise this way directly
+        reduces the slope noise of the regression, which is the dominant
+        error source in the correction.
+        """
+        client = NTPClient()
+        best = None
+        burst = []
+        for index in range(max(1, samples)):
+            if index and spacing > 0:
+                time.sleep(spacing)
+            try:
+                response = client.request(self._ntp_ip, version=3)
+            except Exception as err:
+                burst.append({'error': f'{type(err).__name__}: {err}'})
+                continue
+            burst.append({
+                'offset': response.offset,
+                'delay': response.delay,
+            })
+            if best is None or response.delay < best.delay:
+                best = response
+        if best is None:
+            raise RuntimeError(
+                'all NTP queries in the drift sample burst failed'
+            )
+        return best, burst
+
+    @check_connected
+    def sample_drift(
+        self,
+        samples: int = None,
+        spacing: float = None,
+    ) -> dict:
         """Query the NTP server and record an offset sample.
 
         This does not send any ECI clock-sync command. It only asks the
         amplifier/Net Station NTP server for the current NTP offset so that
         client-side timestamps can be drift-corrected.
+
+        Parameters
+        ----------
+        samples:
+            Number of NTP queries to make in this burst. The lowest-delay
+            reply becomes the recorded sample; the rest are summarized in
+            the returned record but do not enter the drift history.
+            Defaults to ``set_drift_sampling(samples=...)``.
+        spacing:
+            Seconds to wait between queries within the burst. Defaults to
+            ``set_drift_sampling(spacing=...)``.
+
+        Notes
+        -----
+        A burst blocks for roughly ``(samples - 1) * spacing`` plus the
+        round trips. Call this between trials, never near a screen flip.
         """
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
         if self._syncepoch is None:
             raise RuntimeError('sample_drift is unavailable before NTP sync')
-        c = NTPClient()
-        response = c.request(self._ntp_ip, version=3)
-        return self._record_ntp_drift_sample(response, source='drift_sample')
+        if samples is None:
+            samples = self._drift_samples_per_call
+        if spacing is None:
+            spacing = self._drift_sample_spacing
+        # The network round trips happen outside every lock.
+        response, burst = self._query_ntp_best_of(samples, spacing)
+        with self._clock_lock:
+            self._auto_drift_last_monotonic = time.monotonic()
+            return self._record_ntp_drift_sample(
+                response,
+                source='drift_sample',
+                burst=burst,
+            )
+
+    @check_connected
+    def sample_drift_if_due(self, available_pause: float = None) -> dict:
+        """Take a drift sample only if one is due and there is time for it.
+
+        The package owns the sampling schedule; the experiment owns the
+        timing-safety window. Call this from an inter-trial interval and
+        pass how much idle time is available.
+
+        Parameters
+        ----------
+        available_pause:
+            Seconds of idle time the experiment can safely give up. When
+            this is shorter than the configured minimum pause, no sample is
+            taken and the sampler waits for a later opportunity.
+        """
+        with self._clock_lock:
+            if not self._auto_drift_enabled:
+                return {'sampled': False, 'reason': 'disabled'}
+            if self._syncepoch is None:
+                return {'sampled': False, 'reason': 'not_synced'}
+            now = time.monotonic()
+            last = self._auto_drift_last_monotonic
+            if last is not None:
+                due_in = self._auto_drift_interval - (now - last)
+                if due_in > 0:
+                    return {
+                        'sampled': False,
+                        'reason': 'not_due',
+                        'seconds_until_due': due_in,
+                    }
+            min_pause = self._auto_drift_min_pause
+        if available_pause is not None and available_pause < min_pause:
+            return {
+                'sampled': False,
+                'reason': 'pause_too_short',
+                'min_pause': min_pause,
+            }
+        return {
+            'sampled': True,
+            'reason': 'due',
+            'sample': self.sample_drift(),
+        }
 
     def clock_state(self) -> dict:
         """Return current client/server clock synchronization state."""
-        drift = self.drift_estimate()
-        return {
-            'client_clock_start_ntp': self._client_clock_start_ntp,
-            'server_clock_start_ntp': self._server_clock_start_ntp,
-            'syncepoch': self._syncepoch,
-            'sync_monotonic': self._sync_monotonic,
-            'ntp_offset': getattr(self, '_offset', None),
-            'drift_correction': self._drift_correction,
-            'drift_samples': len(self._drift_history),
-            'drift_min_samples': self._drift_min_samples,
-            'drift_min_span': self._drift_min_span,
-            'drift_max_delay': self._drift_max_delay,
-            'drift_max_residual': self._drift_max_residual,
-            'drift_window': self._drift_window,
-            'drift_valid_samples': drift.get('valid_samples'),
-            'drift_rejected_samples': drift.get('rejected_samples'),
-            'drift_model_samples': drift.get('model_samples'),
-            'drift_model_span': drift.get('model_span'),
-            'drift_model_max_residual': drift.get('model_max_residual'),
-            'drift_model_rms_residual': drift.get('model_rms_residual'),
-            'drift_slope': drift.get('slope'),
-            'active_drift_slope': drift.get('active_slope'),
-            'predicted_ntp_offset': drift.get('predicted_offset'),
-        }
+        with self._clock_lock:
+            drift = self.drift_estimate()
+            return {
+                'client_clock_start_ntp': self._client_clock_start_ntp,
+                'server_clock_start_ntp': self._server_clock_start_ntp,
+                'syncepoch': self._syncepoch,
+                'sync_monotonic': self._sync_monotonic,
+                'ntp_offset': getattr(self, '_offset_mono', None),
+                'ntp_offset_raw': getattr(self, '_offset', None),
+                'sys_mono_skew': (
+                    self._drift_history[-1]['sys_mono_skew']
+                    if self._drift_history else None
+                ),
+                'drift_correction': self._drift_correction,
+                'drift_samples': len(self._drift_history),
+                'drift_min_samples': self._drift_min_samples,
+                'drift_min_span': self._drift_min_span,
+                'drift_max_delay': self._drift_max_delay,
+                'drift_max_residual': self._drift_max_residual,
+                'drift_window': self._drift_window,
+                'drift_valid_samples': drift.get('valid_samples'),
+                'drift_rejected_samples': drift.get('rejected_samples'),
+                'drift_model_samples': drift.get('model_samples'),
+                'drift_model_span': drift.get('model_span'),
+                'drift_model_max_residual': drift.get('model_max_residual'),
+                'drift_model_rms_residual': drift.get('model_rms_residual'),
+                'drift_slope': drift.get('slope'),
+                'active_drift_slope': drift.get('active_slope'),
+                'predicted_ntp_offset': drift.get('predicted_offset'),
+                'drift_accepted_fits': self._drift_accepted_fits,
+                'drift_rejected_fits': self._drift_rejected_fits,
+                'drift_last_reject_reason': self._drift_last_reject_reason,
+                'drift_slew': self._drift_slew,
+                'drift_max_model_age': self._drift_max_model_age,
+                'drift_samples_per_call': self._drift_samples_per_call,
+                'drift_pending_error': (
+                    None if self._drift_active_model is None
+                    else self._drift_active_model.get('error')
+                ),
+                'drift_model_age': (
+                    None
+                    if self._drift_active_model is None
+                    or self._sync_monotonic is None
+                    else (
+                        time.monotonic() - self._sync_monotonic
+                        - self._drift_active_model['anchor_elapsed']
+                    )
+                ),
+            }
 
     def _record_ntp_drift_sample(
         self,
@@ -719,6 +1072,7 @@ class NetStation(object):
         source: str,
         local_time: float = None,
         monotonic_time: float = None,
+        burst: list = None,
     ) -> dict:
         if local_time is None:
             local_time = time.time()
@@ -736,6 +1090,21 @@ class NetStation(object):
             'delay': response.delay,
             'tx_time': response.tx_time,
         }
+        # ntplib reports the offset against the local *system* clock, but
+        # event timestamps are built on the *monotonic* clock. Those two
+        # frames diverge whenever the OS time daemon disciplines the system
+        # clock, and on macOS that happens continuously. Re-reference the
+        # offset to the monotonic clock so OS clock adjustments cancel out
+        # instead of being injected into event timestamps.
+        sample['sys_mono_skew'] = local_time - monotonic_time
+        sample['offset_mono'] = response.offset + sample['sys_mono_skew']
+        delays = [
+            entry['delay'] for entry in (burst or [])
+            if 'delay' in entry
+        ]
+        sample['burst_size'] = len(burst) if burst else 1
+        sample['burst_ok'] = len(delays) if burst else 1
+        sample['burst_worst_delay'] = max(delays) if delays else None
         sample['valid'] = response.delay <= self._drift_max_delay
         sample['reject_reason'] = None if sample['valid'] else 'high_delay'
         self._drift_history.append(sample)
@@ -758,22 +1127,29 @@ class NetStation(object):
         self._drift_model_dirty = False
         return self._drift_model
 
+    def _reject_fit(self, reason: str):
+        self._drift_last_reject_reason = reason
+        self._drift_rejected_fits += 1
+        if self._debug:
+            print(f'{cyan}NTP drift fit rejected: {reason}{reset}')
+        return None
+
     def _fit_ntp_drift_regression(self):
         samples = self._valid_drift_samples(windowed=True)
         if len(samples) < self._drift_min_samples:
-            return None
+            return self._reject_fit('too_few_samples')
 
         span = samples[-1]['elapsed'] - samples[0]['elapsed']
         if span < self._drift_min_span:
-            return None
+            return self._reject_fit('short_span')
 
         xs = [sample['elapsed'] for sample in samples]
-        ys = [sample['offset'] for sample in samples]
+        ys = [sample['offset_mono'] for sample in samples]
         mean_x = sum(xs) / len(xs)
         mean_y = sum(ys) / len(ys)
         denom = sum((x - mean_x) ** 2 for x in xs)
         if denom == 0:
-            return None
+            return self._reject_fit('degenerate_span')
         slope = sum((x - mean_x) * (y - mean_y)
                     for x, y in zip(xs, ys)) / denom
         intercept = mean_y - slope * mean_x
@@ -783,11 +1159,19 @@ class NetStation(object):
         ]
         max_residual = max(abs(value) for value in residuals)
         if max_residual > self._drift_max_residual:
-            return None
+            return self._reject_fit('high_residual')
+        self._drift_last_reject_reason = None
         rms_residual = (
             sum(value ** 2 for value in residuals) / len(residuals)
         ) ** 0.5
         return {
+            'fit_id': (
+                len(samples),
+                samples[0]['elapsed'],
+                samples[-1]['elapsed'],
+                slope,
+                intercept,
+            ),
             'slope': slope,
             'intercept': intercept,
             'sample_count': len(samples),
@@ -819,7 +1203,7 @@ class NetStation(object):
     def _predict_ntp_offset(self, elapsed: float = None):
         if elapsed is None:
             if self._sync_monotonic is None:
-                return getattr(self, '_offset', None)
+                return getattr(self, '_offset_mono', None)
             elapsed = time.monotonic() - self._sync_monotonic
 
         estimate = self._ntp_drift_regression()
@@ -827,28 +1211,53 @@ class NetStation(object):
             active_offset = self._predict_active_ntp_offset(elapsed)
             if active_offset is not None:
                 return active_offset
-            return getattr(self, '_offset', None)
+            return getattr(self, '_offset_mono', None)
         self._activate_drift_model(estimate, elapsed)
         return self._predict_active_ntp_offset(elapsed)
 
     def _drift_model_id(self, estimate: dict):
-        return (
-            estimate['sample_count'],
-            estimate['first_elapsed'],
-            estimate['last_elapsed'],
-            estimate['slope'],
-            estimate['intercept'],
-        )
+        # Identifies one accepted fit, so a model is activated exactly once
+        # per refit rather than once per getTime() call.
+        return estimate['fit_id']
 
     def _predict_active_ntp_offset(self, elapsed: float):
+        """Predict the NTP offset from the active model.
+
+        The prediction is the continuity anchor, plus the modeled slope over
+        the elapsed time since the anchor, plus whatever portion of the
+        outstanding level error has been retired so far. The last term is
+        what closes the loop: it pulls the applied correction toward the
+        level the regression actually measured, instead of letting the
+        correction free-run on integrated slope alone.
+        """
         if elapsed is None:
-            return getattr(self, '_offset', None)
+            return getattr(self, '_offset_mono', None)
         active = self._drift_active_model
         if active is None:
-            return getattr(self, '_offset', None)
+            return getattr(self, '_offset_mono', None)
+
+        dt = elapsed - active['anchor_elapsed']
+        if dt < 0:
+            dt = 0.0
+        # Do not extrapolate a stale slope without bound. Past the age
+        # limit, hold the last modeled value rather than letting an
+        # increasingly old rate estimate run away.
+        max_age = self._drift_max_model_age
+        slope_dt = dt if max_age is None else min(dt, max_age)
+
+        error = active.get('error', 0.0)
+        slew = active.get('slew', 0.0)
+        if slew <= 0 or error == 0.0:
+            retired = error
+        elif error > 0:
+            retired = min(error, slew * dt)
+        else:
+            retired = max(error, -slew * dt)
+
         return (
             active['anchor_offset'] +
-            active['slope'] * (elapsed - active['anchor_elapsed'])
+            active['slope'] * slope_dt +
+            retired
         )
 
     def _activate_drift_model(self, estimate: dict, elapsed: float) -> None:
@@ -856,28 +1265,57 @@ class NetStation(object):
         active = self._drift_active_model
         if active is not None and active.get('model_id') == model_id:
             return
+        if elapsed is None:
+            return
 
-        # Preserve the timestamp mapping at the instant a new regression is
-        # accepted. New fits may change the correction slope, but never jump
-        # event timestamps by changing the intercept under an active recording.
+        # Continuity anchor: whatever the previous model predicts right now.
+        # Activating a new fit never steps event timestamps.
         anchor_offset = self._predict_active_ntp_offset(elapsed)
         if anchor_offset is None:
-            anchor_offset = getattr(self, '_offset', None)
+            anchor_offset = getattr(self, '_offset_mono', None)
+
+        # Level the new regression actually measures at this instant. The
+        # old code computed this, stored it for diagnostics, and then threw
+        # it away -- which made the correction an open-loop integral of
+        # noisy slope estimates, free to random-walk without bound. Keeping
+        # it as an error term to retire is what makes the corrector stable
+        # over long recordings.
+        target_offset = estimate['intercept'] + estimate['slope'] * elapsed
         if anchor_offset is None:
-            anchor_offset = estimate['intercept'] + estimate['slope'] * elapsed
+            anchor_offset = target_offset
 
         self._drift_active_model = {
             'model_id': model_id,
             'slope': estimate['slope'],
             'anchor_elapsed': elapsed,
             'anchor_offset': anchor_offset,
-            'raw_anchor_offset': (
-                estimate['intercept'] + estimate['slope'] * elapsed
-            ),
+            'raw_anchor_offset': target_offset,
+            'error': target_offset - anchor_offset,
+            'slew': self._drift_slew,
             'activated_local_time': time.time(),
         }
+        self._drift_accepted_fits += 1
+        if self._debug:
+            error_ms = (target_offset - anchor_offset) * 1000.0
+            print(
+                f'{cyan}NTP drift model activated '
+                f'elapsed={elapsed:.3f} '
+                f'slope={estimate["slope"] * 1000.0 * 3600.0:.3f} ms/h '
+                f'level_error={error_ms:.3f} ms{reset}'
+            )
 
     def _update_server_clock_start(
+        self,
+        server_start_ntp: float,
+        received_local: float,
+        source: str,
+    ) -> None:
+        with self._clock_lock:
+            self._apply_server_clock_start(
+                server_start_ntp, received_local, source
+            )
+
+    def _apply_server_clock_start(
         self,
         server_start_ntp: float,
         received_local: float,
@@ -932,7 +1370,8 @@ class NetStation(object):
         When strict is False, unexpected ECI responses are returned as a
         diagnostic dictionary instead of being raised.
         """
-        return self._command(cmd, data, strict=strict)
+        with self._io_lock:
+            return self._command(cmd, data, strict=strict)
 
     def _format_bytes(self, bytearr: bytes) -> str:
         """Return compact hex/ascii debug text for a byte string."""
@@ -1071,23 +1510,24 @@ class NetStation(object):
         --------
         eci.eci: module for building commands and parsing responses
         """
-        if not self._connected:
-            raise NetStationUnconnected()
-        eci_cmd = build_command(cmd, data)
-        self._debug_tx(cmd, data, eci_cmd)
-        self._socket.write(eci_cmd)
-        response = self._read_response_token()
-        try:
-            parsed = parse_response(response)
-        except InvalidECIResponse as err:
-            self._debug_rx_error(response, err)
-            self._log_unexpected_response(cmd, response, err)
-            return self._response_record(response, err)
-        except ECIResponseFailure as err:
-            self._debug_rx_error(response, err)
-            self._log_response_failure(cmd, response, err)
-            if strict:
-                raise
-            return self._response_record(response, err)
-        self._debug_rx(response, parsed)
-        return parsed
+        with self._io_lock:
+            if not self._connected:
+                raise NetStationUnconnected()
+            eci_cmd = build_command(cmd, data)
+            self._debug_tx(cmd, data, eci_cmd)
+            self._socket.write(eci_cmd)
+            response = self._read_response_token()
+            try:
+                parsed = parse_response(response)
+            except InvalidECIResponse as err:
+                self._debug_rx_error(response, err)
+                self._log_unexpected_response(cmd, response, err)
+                return self._response_record(response, err)
+            except ECIResponseFailure as err:
+                self._debug_rx_error(response, err)
+                self._log_response_failure(cmd, response, err)
+                if strict:
+                    raise
+                return self._response_record(response, err)
+            self._debug_rx(response, parsed)
+            return parsed
