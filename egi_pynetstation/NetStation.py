@@ -6,6 +6,7 @@
 import binascii
 import json
 import logging
+import queue
 import threading
 import time
 from pathlib import Path
@@ -141,6 +142,14 @@ class NetStation(object):
         self._auto_drift_last_monotonic = None
         self._response_tokens = []
         self._recording_start = None
+        # Background event sender. When enabled, send_event() captures the
+        # timestamp on the calling thread and hands the socket write to a
+        # worker, so a screen-flip callback is never blocked by network I/O.
+        self._async_events = False
+        self._event_queue = None
+        self._event_thread = None
+        self._event_stop = object()
+        self._event_errors = []
 
     def check_connected(func) -> None:
         """Decorator to raise exception if not connected
@@ -196,6 +205,7 @@ class NetStation(object):
         drift_sample_spacing: float = None,
         drift_slew: float = None,
         drift_max_model_age: float = None,
+        async_events: bool = False,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
@@ -222,6 +232,12 @@ class NetStation(object):
             of elapsed time, at which level errors are retired
         drift_max_model_age: optional maximum seconds a fitted slope may be
             extrapolated past its anchor; 0 for unbounded
+        async_events: send events from a background thread. Recommended for
+            visual experiments: send_event() then captures the timestamp and
+            returns immediately, so it is safe to call from a screen-flip
+            callback such as PsychoPy's win.callOnFlip(). Queued events are
+            flushed automatically by end_rec() and disconnect(); any send
+            failures are collected in event_errors()
 
         Raises
         ------
@@ -279,6 +295,9 @@ class NetStation(object):
                 slew=drift_slew,
                 max_model_age=drift_max_model_age,
             )
+        self._async_events = async_events
+        if async_events:
+            self._start_event_sender()
         if handshake:
             self._command('Query', self._endian)
             self._command('Attention')
@@ -372,7 +391,9 @@ class NetStation(object):
 
             last_response = response
             for _ in range(max_followups):
-                event_response = self.send_event(event_type="resy", label='resy')
+                event_response = self.send_event(
+                    event_type="resy", label='resy', wait=True
+                )
                 if isinstance(event_response, float):
                     self._update_server_clock_start(
                         event_response,
@@ -447,7 +468,12 @@ class NetStation(object):
 
     @check_connected
     def disconnect(self) -> None:
-        """Close the TCP/IP connection."""
+        """Close the TCP/IP connection.
+
+        Any queued asynchronous events are flushed before the socket closes.
+        """
+        self.flush_events()
+        self._stop_event_sender()
         with self._io_lock:
             self._command('Exit')
             self._socket.disconnect()
@@ -467,7 +493,12 @@ class NetStation(object):
 
     @check_connected
     def end_rec(self) -> None:
-        """End Recording"""
+        """End Recording
+
+        Any queued asynchronous events are flushed first, so events sent
+        just before this call still reach Net Station.
+        """
+        self.flush_events()
         with self._io_lock:
             self._command('EndRecording')
             self._recording_start = None
@@ -481,6 +512,7 @@ class NetStation(object):
         label: str = ' ' * 4,
         desc: str = ' ' * 4,
         data: dict = {},
+        wait: bool = None,
     ) -> None:
         """Send event to amplifier
 
@@ -533,22 +565,140 @@ class NetStation(object):
         --------
         eci.eci for explanations of the internals of the packaging
         """
-        # The timestamp is resolved before the socket lock is taken, so a
-        # send in progress on another thread can never delay it.
-        if start == 'now':
-            start = self.getTime()
-        elif isinstance(start, float):
-            start = start
-        else:
+        if wait is None:
+            wait = not self._async_events
+
+        if not (start == 'now' or isinstance(start, (int, float))):
             t_start = type(start)
             return TypeError(
                 f'Start is type {t_start}, should be str "now" or float'
             )
-        data = package_event(
+
+        if not wait:
+            # Capture the clock reading on THIS thread -- the one that is
+            # aligned with the stimulus -- then hand everything else to the
+            # worker. This call is the one that may run in a flip callback,
+            # so it must not touch a lock or the socket.
+            monotonic_at_call = time.monotonic()
+            self._event_queue.put((
+                monotonic_at_call,
+                {
+                    'start': None if start == 'now' else float(start),
+                    'duration': duration,
+                    'event_type': event_type,
+                    'label': label,
+                    'desc': desc,
+                    'data': data,
+                },
+            ))
+            return None
+
+        # The timestamp is resolved before the socket lock is taken, so a
+        # send in progress on another thread can never delay it.
+        if start == 'now':
+            start = self.getTime()
+        return self._send_event_now(
+            start=float(start),
+            duration=duration,
+            event_type=event_type,
+            label=label,
+            desc=desc,
+            data=data,
+        )
+
+    def _send_event_now(
+        self,
+        start: float,
+        duration: float = 0.001,
+        event_type: str = ' ' * 4,
+        label: str = ' ' * 4,
+        desc: str = ' ' * 4,
+        data: dict = {},
+    ):
+        """Package and write one event. Assumes ``start`` is already resolved."""
+        packaged = package_event(
             start, duration, event_type, label, desc, data
         )
         with self._io_lock:
-            return self._command('EventData', data)
+            return self._command('EventData', packaged)
+
+    def _start_event_sender(self) -> None:
+        if self._event_thread is not None:
+            return
+        self._event_queue = queue.Queue()
+        self._event_thread = threading.Thread(
+            target=self._event_sender_loop,
+            name='eci-event-sender',
+            daemon=True,
+        )
+        self._event_thread.start()
+
+    def _event_sender_loop(self) -> None:
+        while True:
+            item = self._event_queue.get()
+            try:
+                if item is self._event_stop:
+                    return
+                monotonic_at_call, kwargs = item
+                try:
+                    if kwargs.get('start') is None:
+                        kwargs['start'] = self.time_at_monotonic(
+                            monotonic_at_call
+                        )
+                    self._send_event_now(**kwargs)
+                except Exception as err:
+                    # Never let one bad event kill the sender thread. Record
+                    # it so the experiment can check event_errors() later.
+                    record = {
+                        'time': time.time(),
+                        'error': f'{type(err).__name__}: {err}',
+                        'event_type': kwargs.get('event_type'),
+                    }
+                    with self._clock_lock:
+                        self._event_errors.append(record)
+                    logger.error(
+                        'Asynchronous ECI event send failed: %s',
+                        record['error'],
+                    )
+            finally:
+                self._event_queue.task_done()
+
+    @check_connected
+    def flush_events(self, timeout: float = None) -> bool:
+        """Block until every queued asynchronous event has been sent.
+
+        Called automatically by ``end_rec()`` and ``disconnect()``, so most
+        experiments never need it. Returns True if the queue drained.
+        """
+        if self._event_queue is None:
+            return True
+        if timeout is None:
+            self._event_queue.join()
+            return True
+        deadline = time.monotonic() + timeout
+        while not self._event_queue.empty():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    def event_errors(self) -> list:
+        """Return any errors raised while sending asynchronous events.
+
+        Asynchronous sends cannot raise into the experiment's own code, so
+        failures are collected here instead of being lost. An empty list
+        means every queued event was sent successfully.
+        """
+        with self._clock_lock:
+            return list(self._event_errors)
+
+    def _stop_event_sender(self) -> None:
+        if self._event_thread is None:
+            return
+        self._event_queue.put(self._event_stop)
+        self._event_thread.join(timeout=5.0)
+        self._event_thread = None
+        self._event_queue = None
 
     def rec_start(self) -> float:
         """Get recording start time from time.time()

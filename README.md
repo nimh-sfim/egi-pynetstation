@@ -54,8 +54,10 @@ provide roughly 15.6 ms instead, which degrades timing silently rather than
 raising an error. Run this once on any new stimulus computer:
 
 ```bash
-python check_clocks.py
+python -m egi_pynetstation.check_clocks
 ```
+
+From a repository checkout, `python check_clocks.py` does the same thing.
 
 It reports measured resolution for each clock, `time.sleep()` overshoot, and
 the jitter in the system-versus-monotonic clock difference. On Windows,
@@ -92,130 +94,101 @@ Event types must be exactly four ASCII characters. The default
 
 # Integrating With Your Own PsychoPy Experiment
 
-This section is the practical guide. It covers the four things that actually
-determine timing accuracy, in the order they matter.
-
-## The Short Version
+Connect with `async_events=True`, then send markers straight from
+`win.callOnFlip()`. The package handles the threading, the timestamp
+capture, and the flushing.
 
 ```python
-import queue
-import threading
-import time
-
+from psychopy import visual, core
 from egi_pynetstation import NetStation
-from psychopy import core, visual
 
 ns = NetStation('10.10.10.42', 55513)
-ns.connect(ntp_ip='10.10.10.51')       # drift correction on by default
-ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35)
-ns.begin_rec()
+ns.connect(ntp_ip='10.10.10.51', async_events=True)
+ns.configure_auto_drift(enabled=True, interval=15.0)
 
-# --- worker thread: converts captured timestamps and sends events ---------
-event_queue = queue.Queue()
-
-def sender():
-    while True:
-        item = event_queue.get()
-        if item is None:
-            return
-        code, monotonic_at_flip = item
-        start = ns.time_at_monotonic(monotonic_at_flip)
-        ns.send_event(start=start, event_type=code, label=code)
-
-worker = threading.Thread(target=sender, daemon=True)
-worker.start()
-
-# --- stimulus loop --------------------------------------------------------
 win = visual.Window(fullscr=True, screen=1, color='black')
-stim = visual.Circle(win, radius=0.05, fillColor='white')
+stim = visual.TextStim(win, text='+')
 
 try:
-    for trial in range(200):
-        def mark_onset():
-            # Runs on the flip that makes the stimulus visible.
-            # Capture a raw clock reading only. Nothing else.
-            event_queue.put(('stm+', time.monotonic()))
+    ns.begin_rec()
 
+    for trial in range(100):
         stim.draw()
-        win.callOnFlip(mark_onset)
+        win.callOnFlip(ns.send_event, event_type='stm+', label='stimulus')
         win.flip()
+        core.wait(0.5)
 
-        # ... your inter-trial interval ...
-        # Offer the package the idle time you can safely give up.
-        ns.sample_drift_if_due(available_pause=iti_seconds_remaining)
+        # Inter-trial interval. Tell the package how much idle time it may
+        # use; it samples only when one is due and there is room for it.
+        ns.sample_drift_if_due(available_pause=1.0)
+        core.wait(1.0)
 finally:
-    event_queue.put(None)
-    worker.join()
-    ns.end_rec()
+    ns.end_rec()      # flushes any queued events
     ns.disconnect()
 ```
 
-## 1. Capture the Timestamp on the Flip, Send it Later
+That is the whole integration. No `queue`, no `threading`, no manual
+timestamp bookkeeping.
 
-The single most important pattern. Your flip callback should capture a raw
-`time.monotonic()` reading and nothing else — no network I/O, no locks, no
-drift-model work.
+## What `async_events=True` Does
 
-`ns.time_at_monotonic(monotonic_time)` converts a previously captured
-monotonic reading into an event timestamp. The resulting timestamp describes
-the instant of capture, not the instant of conversion, so you can convert it
-on a worker thread well after the frame has appeared.
+`send_event()` captures `time.monotonic()` on the calling thread — the one
+aligned with your stimulus — puts the event on a queue, and returns. A
+background worker converts that reading into a drift-corrected event
+timestamp and writes to the socket.
 
-```python
-def mark_onset():
-    event_queue.put(('stm+', time.monotonic()))   # cheap: ~microseconds
+This makes `send_event()` safe to call from a flip callback. Measured block
+time on the calling thread is about 16 microseconds, versus milliseconds if
+the socket write happened inline.
 
-win.callOnFlip(mark_onset)
-win.flip()
-```
+The timestamp describes **when the flip happened**, not when the network
+write completed, so a slow or backlogged send cannot move your event
+timing.
 
-Calling `ns.getTime()` directly in the callback also works and is safe — the
-package uses separate locks for socket I/O and clock state, so a send in
-progress on another thread cannot stall a timestamp read. Measured worst case
-is about 9 microseconds even while a worker thread is saturating the socket.
-But `time_at_monotonic()` is still preferable, because it moves *all* of the
-work off the critical path rather than merely making it fast.
+Two consequences worth knowing:
 
-Do **not** call `ns.clock_state()` or `ns.drift_estimate()` inside a flip
-callback. Those build a full diagnostic dictionary. Call them from the worker
-thread or between trials.
-
-## 2. Send Events From a Worker Thread
-
-`ns.send_event()` writes to a TCP socket and waits for the ECI response. Doing
-that inline will delay your flip.
-
-Pass the pre-captured timestamp via `start=`:
+- `send_event()` returns `None` in async mode, because there is no response
+  yet. Use `wait=True` on any individual call if you need the ECI response.
+- Send failures cannot raise into your experiment code, so they are
+  collected instead. Check them at the end of a run:
 
 ```python
-start = ns.time_at_monotonic(monotonic_at_flip)
-ns.send_event(start=start, event_type='stm+', label='stm+')
+errors = ns.event_errors()
+if errors:
+    print(f'{len(errors)} events failed to send:', errors[:3])
 ```
 
-Because the timestamp is captured at the flip and carried through explicitly,
-it does not matter when the send actually happens. Measured send latency on
-the reference setup is 0.23 ms median, 0.45 ms maximum, but correctness does
-not depend on that.
+Queued events are flushed automatically by `end_rec()` and `disconnect()`.
+Call `ns.flush_events()` yourself only if you need a synchronisation point
+mid-experiment.
 
-The `NetStation` object is safe to use from multiple threads.
+## Without `async_events`
 
-## 3. Sample Drift During Safe Windows
+The default is synchronous, which preserves the original behaviour:
+`send_event()` writes to the socket and returns the parsed ECI response.
+That is fine for non-visual experiments and for diagnostics, but it will
+block a flip callback for the duration of a network round trip. Use
+`async_events=True` for anything where stimulus timing matters.
+
+## Drift Sampling
 
 Drift samples are NTP queries. They do **not** send ECI clock-sync commands
-and do not create markers. But they do block the calling thread for roughly
+and do not create markers. They do block the calling thread for roughly
 170 ms at default settings, so they must not land near a flip.
 
 Let the package own the schedule and your experiment own the safety window:
 
 ```python
 ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35)
-
-# In your inter-trial interval, once you know how much idle time is left:
-status = ns.sample_drift_if_due(available_pause=iti_remaining)
+ns.sample_drift_if_due(available_pause=iti_remaining)   # in your ITI
 ```
 
-The call returns without sampling if a sample is not due yet, or if the pause
-you offered is shorter than `min_pause`. Return values:
+`available_pause` is how much idle time you can safely give up. If a sample
+is not due yet, or the pause you offered is too short, the call returns
+without sampling. Omit `available_pause` if your intervals are comfortably
+long and you do not want the check.
+
+Return values:
 
 ```python
 {'sampled': True,  'reason': 'due', 'sample': {...}}
@@ -225,28 +198,27 @@ you offered is shorter than `min_pause`. Return values:
 {'sampled': False, 'reason': 'not_synced'}
 ```
 
-If you would rather manage the schedule yourself, call `ns.sample_drift()`
-directly from a point you know is safe.
+To manage the schedule yourself, call `ns.sample_drift()` from a point you
+know is safe.
 
 Each call makes several rapid NTP queries and keeps the lowest-delay reply.
-NTP offset error tracks path asymmetry, which tracks round-trip delay, so the
-fastest reply in a short burst is the most trustworthy. Selecting the minimum
-is considerably better than averaging, which folds the bad replies back in.
+NTP offset error tracks path asymmetry, which tracks round-trip delay, so
+the fastest reply in a short burst is the most trustworthy. Selecting the
+minimum beats averaging, which folds the bad replies back in.
 
 ```python
 ns.set_drift_sampling(samples=4, spacing=0.05)   # defaults
 ```
 
 A burst blocks for about `(samples - 1) * spacing` plus the round trips.
-Budget for it when choosing `min_pause`.
+Budget for that when choosing `min_pause`.
 
 **How often?** The model needs `drift_min_samples` valid samples spanning
-`drift_min_span` seconds before it engages. At the defaults (13 samples,
-180 s) with 15-second sampling, correction becomes active after about four
-minutes. Sampling every 15 to 60 seconds is reasonable; more frequent
-sampling mostly buys noise reduction on the slope estimate.
+`drift_min_span` seconds before it engages — about four minutes at the
+defaults with 15-second sampling. Every 15 to 60 seconds is reasonable;
+more frequent sampling mostly reduces noise on the slope estimate.
 
-## 4. Prevent the Machine From Sleeping
+## Prevent the Machine From Sleeping
 
 On macOS, wrap your run:
 
@@ -255,14 +227,14 @@ caffeinate -dis python my_experiment.py
 ```
 
 `-d` prevents display sleep, `-i` prevents idle sleep, `-s` prevents system
-sleep (honored only on AC power). When a utility is given, the assertions are
-held for exactly the duration of that process.
+sleep (honored only on AC power). Given a utility, the assertions are held
+for exactly that process's lifetime.
 
 This matters for more than the screensaver. Python's `time.monotonic()` on
 macOS does not advance while the machine is asleep, so a sleep mid-recording
 would corrupt the elapsed-time baseline. Also disable the screen saver
 explicitly — the display-sleep assertion is not documented to suppress it —
-and confirm no password-on-wake lock can interrupt the run.
+and make sure no password-on-wake lock can interrupt the run.
 
 Prefer AC power. On battery, `-s` is silently ignored, Low Power Mode alters
 timer coalescing, and the scheduler leans harder on efficiency cores.
@@ -641,6 +613,7 @@ happens only when user code calls `ns.sample_drift()` or
 | `drift_sample_spacing` | `0.05` s | Seconds between queries within one burst. |
 | `drift_slew` | `0.0002` | Maximum seconds of level correction retired per second elapsed. `0` applies instantly. |
 | `drift_max_model_age` | `600.0` s | Stop extrapolating a fitted slope after this age; the correction then holds. `0` is unbounded. |
+| `async_events` | `False` | Send events from a background thread so `send_event()` is safe inside a flip callback. Recommended for visual experiments. |
 
 Auto-drift scheduling:
 
@@ -654,13 +627,16 @@ Auto-drift scheduling:
 
 ```python
 # Connection
-ns.connect(ntp_ip=..., drift_correction=True, ...)
+ns.connect(ntp_ip=..., async_events=True, drift_correction=True, ...)
 ns.begin_rec()
-ns.end_rec()
-ns.disconnect()
+ns.end_rec()          # flushes queued events
+ns.disconnect()       # flushes queued events, stops the sender
 
 # Events
 ns.send_event(start='now', event_type='stm+', label='stm+')
+ns.send_event(..., wait=True)         # force a synchronous send
+ns.flush_events(timeout=None)         # block until the queue drains
+ns.event_errors()                     # failures from asynchronous sends
 ns.getTime()                          # timestamp for right now
 ns.time_at_monotonic(monotonic_time)  # timestamp for a captured reading
 
