@@ -251,6 +251,72 @@ instructions so the model is live before your first trial.
 
 ---
 
+# Example Scripts
+
+| Script | What it is |
+| --- | --- |
+| [`example3_stroop.py`](example3_stroop.py) | A complete Stroop task. **Start here** if you are writing an experiment. |
+| [`psychopy_demo.py`](psychopy_demo.py) | The smallest possible PsychoPy loop, in the style of the bundled PsychoPy hardware demos. |
+| [`example.py`](example.py) | Non-visual: connect, send timed events, disconnect. No PsychoPy needed. |
+| [`example2.py`](example2.py) | Interactive ECI console and scripted diagnostics. See [Diagnostics](#diagnostics). |
+| [`psychopy_photocell_drift.py`](psychopy_photocell_drift.py) | Timing validation against a photocell. See [PsychoPy Photocell Test](#psychopy-photocell-test). |
+
+## Stroop Example
+
+`example3_stroop.py` runs five colour words in five ink colours — all 25
+combinations shuffled, so 5 congruent and 20 incongruent trials. It is
+written as a reference for the smallest clean setup: every line that talks
+to the amplifier is marked with an `EGI:` comment, and there are only seven
+of them.
+
+```bash
+python example3_stroop.py
+```
+
+Edit the three addresses at the top of the file for your network.
+
+Markers written to the recording:
+
+| Event type | When | Description field |
+| --- | --- | --- |
+| `cong` | stimulus onset, word matches ink | — |
+| `inco` | stimulus onset, word differs from ink | — |
+| `resp` | button press | `key=r incorrect target=p` |
+| `miss` | no response before the timeout | `no response within 2.000 s` |
+
+The response marker shows the convention worth copying: put the
+human-readable outcome in `desc`, where it is legible in Net Station
+without decoding anything, and keep the machine-readable version in `data`
+for analysis.
+
+```python
+ns.send_event(
+    event_type='resp',
+    label=f'key {pressed}',
+    desc=f'key={pressed} {"correct" if is_correct else "incorrect"} '
+         f'target={correct_key}',
+    data={'trl_': index, 'key_': pressed, 'corr': is_correct, 'rt__': rt},
+)
+```
+
+It also demonstrates the two ECI constraints that catch people out:
+**event types must be exactly four ASCII characters**, and **every key in
+`data` must be exactly four characters too**. Hence `trl_`, `key_`, `corr`,
+`rt__`, `word`, `colr`. Values may be `bool`, `int`, `float`, or `str`, and
+the dictionary must be flat. `label` and `desc` are free text up to 256
+characters.
+
+Marking a `miss` matters more than it looks: without it, a timed-out trial
+has a stimulus onset with no matching response event, which makes epoching
+awkward later.
+
+Note that a 25-trial run takes roughly two minutes, so drift correction
+will probably never engage — it needs 13 NTP samples spanning 180 seconds
+by default. Timestamps are still correct, just uncorrected for drift. See
+[Warm-Up Caveat](#warm-up-caveat).
+
+---
+
 # Drift Correction
 
 Client-side drift correction is enabled by default.
@@ -476,6 +542,9 @@ onset. It captures the flip timestamp in the flip callback, converts and sends
 on a worker thread, samples NTP drift during safe inter-trial intervals, and
 writes a CSV containing PsychoPy flip times, package event times, send results,
 NTP samples, and the full drift-model state per trial.
+
+Press **q** or **escape** at any point to stop the run early. The CSV log is
+still written, and the recording is closed cleanly.
 
 Use the exported Net Station EVT file and a photocell channel to check whether
 the `stm+` marker-to-photocell offset stays stable across the run.

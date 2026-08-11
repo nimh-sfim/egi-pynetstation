@@ -152,6 +152,11 @@ def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
         record[target] = value
 
 
+# Keys that abort the run. 'Q' is included alongside 'q' because some
+# PsychoPy keyboard backends report a shifted key by its uppercase name.
+QUIT_KEYS = ['escape', 'q', 'Q']
+
+
 CSV_COLUMNS = [
     'trial',
     'phase',
@@ -433,6 +438,7 @@ def main(argv=None) -> int:
             min_pause=args.drift_min_pause,
         )
         print(f'Event send mode: {send_mode}')
+        print('Press q or escape to stop early; the log is still written.')
         if args.ntpsync_every:
             print(
                 'Diagnostic mode: sending ECI ntpsync before every '
@@ -513,7 +519,7 @@ def main(argv=None) -> int:
             # Hold the black screen until the scheduled onset, refreshing
             # every frame so the flip that shows the dot is on schedule.
             while exp_clock.getTime() < next_onset:
-                if event.getKeys(keyList=['escape']):
+                if event.getKeys(keyList=QUIT_KEYS):
                     raise KeyboardInterrupt
                 win.flip()
 
@@ -565,7 +571,7 @@ def main(argv=None) -> int:
 
             dot_off = next_onset + args.dot_duration
             while exp_clock.getTime() < dot_off:
-                if event.getKeys(keyList=['escape']):
+                if event.getKeys(keyList=QUIT_KEYS):
                     raise KeyboardInterrupt
                 dot.draw()
                 win.flip()
@@ -613,7 +619,7 @@ def main(argv=None) -> int:
         print('Drift estimate:', ns.drift_estimate())
         return 0
     except KeyboardInterrupt:
-        print('\nExperiment interrupted.', file=sys.stderr)
+        print('\nExperiment stopped early by the operator.', file=sys.stderr)
         return 130
     finally:
         if win is not None:
