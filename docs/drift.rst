@@ -197,8 +197,8 @@ How often to sample
 
 The model needs ``drift_min_samples`` valid samples spanning
 ``drift_min_span`` seconds before it engages — about four minutes at the
-defaults with 15-second sampling. Every 15 to 60 seconds is reasonable
-after that; more frequent sampling mostly reduces noise on the slope
+defaults, which sample every 15 seconds. Every 15 to 60 seconds is
+reasonable; more frequent sampling mostly reduces noise on the slope
 estimate.
 
 How it works
@@ -329,10 +329,10 @@ Settings reference
      - ``True``
      - Enable the drift sampling schedule. Pass ``False`` to disable.
    * - ``auto_drift_interval``
-     - ``60.0`` s
+     - ``15.0`` s
      - Target seconds between drift samples.
    * - ``auto_drift_min_pause``
-     - ``0.5`` s
+     - ``0.35`` s
      - Minimum idle time before a cooperative sample is taken.
    * - ``auto_drift_background``
      - ``False``

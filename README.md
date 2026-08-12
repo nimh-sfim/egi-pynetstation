@@ -284,8 +284,9 @@ Budget for that when choosing `min_pause`.
 
 **How often?** The model needs `drift_min_samples` valid samples spanning
 `drift_min_span` seconds before it engages — about four minutes at the
-defaults with 15-second sampling. Every 15 to 60 seconds is reasonable;
-more frequent sampling mostly reduces noise on the slope estimate.
+defaults, which sample every 15 seconds. Every 15 to 60 seconds is
+reasonable; more frequent sampling mostly reduces noise on the slope
+estimate.
 
 ## Prevent the Machine From Sleeping
 
@@ -896,4 +897,5 @@ See [LICENSE](LICENSE) for the full text.
 Attribution cannot be required of a public domain work, so this is a request
 rather than a condition — but it is a sincere one. If `egi-pynetstation`
 supports your research, please cite it and acknowledge the authors and the NIH
-Section on Functional Imaging Methods in any derived software or publications.
+Center for Multimodal Neuroimaging ([CMN](https://cmn.nimh.nih.gov)) in any
+derived software or publications.

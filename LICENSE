@@ -23,12 +23,13 @@ condition. We do, however, ask for it, and we would be grateful if you
 honored the request.
 
 If you use egi-pynetstation in published research, please cite it, and
-please acknowledge the authors and the NIH Section on Functional Imaging
-Methods in derived software and documentation. If this package supported
-your work in a way that merits it, we would welcome hearing about it.
-Attribution is how a small scientific software project demonstrates its
-value and justifies its continued development, so the courtesy matters to
-us even where the law does not compel it.
+please acknowledge the authors and the NIH Center for Multimodal
+Neuroimaging (CMN, https://cmn.nimh.nih.gov) in derived software and
+documentation. If this package supported your work in a way that merits
+it, we would welcome hearing about it. Attribution is how a small
+scientific software project demonstrates its value and justifies its
+continued development, so the courtesy matters to us even where the law
+does not compel it.
 
 MIT LICENSE
 

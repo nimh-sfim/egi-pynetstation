@@ -154,8 +154,8 @@ class NetStation(object):
         # schedule is inert until something asks for a sample, so the default
         # costs nothing for experiments that never call it.
         self._auto_drift_enabled = True
-        self._auto_drift_interval = 60.0
-        self._auto_drift_min_pause = 0.5
+        self._auto_drift_interval = 15.0
+        self._auto_drift_min_pause = 0.35
         self._auto_drift_last_monotonic = None
         self._auto_drift_background = False
         self._auto_drift_thread = None
