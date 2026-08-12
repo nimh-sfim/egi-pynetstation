@@ -1,8 +1,9 @@
 """Tests for the built-in asynchronous event sender.
 
-The point of async_events is that send_event() can be called directly from
-a PsychoPy flip callback: it must capture the timestamp on the calling
-thread and return immediately, without touching the socket.
+send_event() must be safe to call directly from a PsychoPy flip callback:
+it captures the timestamp on the calling thread and returns immediately,
+without touching the socket. The same call is equally safe from ordinary
+experiment code, so both usages can be mixed freely.
 """
 
 import importlib
@@ -42,7 +43,6 @@ def make_station(write_delay=0.0):
 
 def test_async_send_event_returns_without_touching_socket():
     ns = make_station(write_delay=0.05)
-    ns._async_events = True
     ns._start_event_sender()
     try:
         start = time.monotonic()
@@ -60,7 +60,6 @@ def test_async_timestamps_are_captured_at_call_not_at_send():
     ns = make_station()
     captured = []
     ns._send_event_now = lambda **kwargs: captured.append(kwargs['start'])
-    ns._async_events = True
     ns._start_event_sender()
     try:
         expected = []
@@ -84,7 +83,6 @@ def test_explicit_start_is_preserved_through_the_queue():
     ns = make_station()
     captured = []
     ns._send_event_now = lambda **kwargs: captured.append(kwargs['start'])
-    ns._async_events = True
     ns._start_event_sender()
     try:
         ns.send_event(start=12.5, event_type='stm+')
@@ -94,9 +92,8 @@ def test_explicit_start_is_preserved_through_the_queue():
     assert captured == [12.5]
 
 
-def test_wait_true_overrides_async_mode():
+def test_wait_true_overrides_the_default():
     ns = make_station()
-    ns._async_events = True
     ns._start_event_sender()
     try:
         result = ns.send_event(event_type='stm+', wait=True)
@@ -117,7 +114,6 @@ def test_sender_survives_a_failing_event_and_records_the_error():
             raise RuntimeError('boom')
 
     ns._send_event_now = flaky
-    ns._async_events = True
     ns._start_event_sender()
     try:
         ns.send_event(event_type='bad_')
@@ -134,22 +130,21 @@ def test_sender_survives_a_failing_event_and_records_the_error():
     assert calls['n'] == 2
 
 
-def test_async_is_the_connect_default():
-    """Visual experiments are the primary use, so async is the default.
+def test_non_blocking_is_the_only_default():
+    """One knob: send_event() never blocks unless asked to.
 
     A blocking socket write inside a flip callback is the failure mode this
-    package exists to avoid, so the safe behaviour should not require the
-    user to know a keyword argument.
+    package exists to avoid, so the safe behaviour must not require the user
+    to know a keyword argument. connect() has no competing setting.
     """
     import inspect
-    signature = inspect.signature(NetStation.connect)
-    assert signature.parameters['async_events'].default is True
+    assert inspect.signature(NetStation.send_event).parameters['wait'].default is False
+    assert 'async_events' not in inspect.signature(NetStation.connect).parameters
 
 
-def test_send_event_does_not_block_by_default_in_async_mode():
-    """With async on, plain send_event() must not wait for the response."""
+def test_send_event_does_not_block_by_default():
+    """Plain send_event() must not wait for the amplifier response."""
     ns = make_station(write_delay=0.05)
-    ns._async_events = True
     ns._start_event_sender()
     try:
         start = time.monotonic()
@@ -162,15 +157,9 @@ def test_send_event_does_not_block_by_default_in_async_mode():
         ns._stop_event_sender()
 
 
-def test_wait_false_works_even_when_the_default_is_synchronous():
-    """The two settings must compose in both directions.
-
-    async_events is only the *default* policy for wait. Passing wait=False
-    explicitly has to work on a synchronous connection too, which means the
-    sender thread starts on first use rather than only at connect().
-    """
+def test_sender_starts_on_demand_if_connect_did_not_start_it():
+    """A non-blocking send must work even with no sender running yet."""
     ns = make_station(write_delay=0.05)
-    ns._async_events = False              # synchronous connection default
     assert ns._event_thread is None       # no sender started yet
     try:
         start = time.monotonic()
@@ -187,7 +176,6 @@ def test_wait_false_works_even_when_the_default_is_synchronous():
 
 def test_lazy_sender_start_is_idempotent():
     ns = make_station()
-    ns._async_events = False
     try:
         for _ in range(5):
             ns.send_event(event_type='stm+', wait=False)
@@ -198,10 +186,9 @@ def test_lazy_sender_start_is_idempotent():
         ns._stop_event_sender()
 
 
-def test_explicit_sync_mode_still_returns_the_eci_response():
+def test_wait_true_returns_the_eci_response():
     ns = make_station()
-    ns._async_events = False
-    result = ns.send_event(event_type='stm+')
+    result = ns.send_event(event_type='stm+', wait=True)
     assert result is not None
     assert ns.writes
 
@@ -209,7 +196,6 @@ def test_explicit_sync_mode_still_returns_the_eci_response():
 def test_queued_events_are_flushed_at_interpreter_exit():
     """Async by default means an unclean exit must not lose events."""
     ns = make_station(write_delay=0.01)
-    ns._async_events = True
     ns._start_event_sender()
     try:
         for _ in range(5):
@@ -226,10 +212,51 @@ def test_queued_events_are_flushed_at_interpreter_exit():
 def test_stopping_the_sender_unregisters_the_exit_hook():
     import atexit
     ns = make_station()
-    ns._async_events = True
     ns._start_event_sender()
     ns.flush_events()
     ns._stop_event_sender()
     # Re-running the hook after shutdown must be harmless.
     ns._flush_at_exit()
     atexit.unregister(ns._flush_at_exit)
+
+
+def test_flip_callback_and_direct_calls_can_be_mixed():
+    """The realistic usage pattern: callOnFlip plus plain calls.
+
+    An experiment marks visual onsets via win.callOnFlip(ns.send_event, ...)
+    and marks other things -- responses, trial boundaries -- with ordinary
+    send_event() calls. Both must stay fast, keep their own call-time
+    timestamps, and preserve order.
+    """
+    ns = make_station(write_delay=0.005)
+    captured = []
+    real_send = ns._send_event_now
+    ns._send_event_now = lambda **kw: (
+        captured.append((kw['event_type'], kw['start'])), real_send(**kw)
+    )[1]
+    ns._start_event_sender()
+    try:
+        spans = []
+        for _ in range(20):
+            # Stands in for the flip callback.
+            start = time.monotonic()
+            ns.send_event(event_type='stim')
+            spans.append(time.monotonic() - start)
+            time.sleep(0.001)
+            # Stands in for a response marker from the main loop.
+            start = time.monotonic()
+            ns.send_event(event_type='resp')
+            spans.append(time.monotonic() - start)
+            time.sleep(0.001)
+        ns.flush_events()
+    finally:
+        ns._stop_event_sender()
+
+    assert len(captured) == 40
+    # Neither path blocks, even though each socket write takes 5 ms.
+    assert max(spans) < 0.005
+    # Order is preserved and timestamps strictly increase across both paths.
+    assert [c[0] for c in captured] == ['stim', 'resp'] * 20
+    stamps = [c[1] for c in captured]
+    assert all(b > a for a, b in zip(stamps, stamps[1:]))
+    assert not ns.event_errors()

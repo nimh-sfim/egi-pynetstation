@@ -5,6 +5,7 @@
 
 import atexit
 import binascii
+import functools
 import json
 import logging
 import queue
@@ -137,10 +138,17 @@ class NetStation(object):
         self._drift_last_reject_reason = None
         self._drift_rejected_fits = 0
         self._drift_accepted_fits = 0
+        self._drift_consecutive_rejections = 0
+        self._drift_stall_after = 5
+        self._drift_stalled = False
+        self._drift_stall_started_elapsed = None
         self._auto_drift_enabled = False
         self._auto_drift_interval = 60.0
         self._auto_drift_min_pause = 0.5
         self._auto_drift_last_monotonic = None
+        self._auto_drift_background = False
+        self._auto_drift_thread = None
+        self._auto_drift_stop = threading.Event()
         self._response_tokens = []
         self._recording_start = None
         # Background event sender. send_event() captures the timestamp on
@@ -163,7 +171,15 @@ class NetStation(object):
         ------
         NetStationUnconnected
             If NetStation hasn't had .connect() run yet
+
+        Notes
+        -----
+        functools.wraps matters here: without it every decorated public
+        method would report itself as ``wrapper(*args, **kwargs)`` with no
+        docstring, which hides the entire API from help(), IDEs, and the
+        Sphinx documentation build.
         """
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             if args[0]._connected:
                 try:
@@ -206,6 +222,10 @@ class NetStation(object):
         drift_sample_spacing: float = None,
         drift_slew: float = None,
         drift_max_model_age: float = None,
+        auto_drift: bool = None,
+        auto_drift_interval: float = None,
+        auto_drift_min_pause: float = None,
+        auto_drift_background: bool = None,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
@@ -232,6 +252,14 @@ class NetStation(object):
             of elapsed time, at which level errors are retired
         drift_max_model_age: optional maximum seconds a fitted slope may be
             extrapolated past its anchor; 0 for unbounded
+        auto_drift: enable automatic NTP drift sampling. Equivalent to
+            calling configure_auto_drift() after connecting
+        auto_drift_interval: target seconds between drift samples
+        auto_drift_min_pause: minimum idle time an experiment must offer
+            before a cooperative sample is taken
+        auto_drift_background: sample from a package-owned thread instead of
+            requiring sample_drift_if_due() calls. See configure_auto_drift()
+            for the tradeoff
 
         Raises
         ------
@@ -289,10 +317,35 @@ class NetStation(object):
                 slew=drift_slew,
                 max_model_age=drift_max_model_age,
             )
+        if (auto_drift is not None or auto_drift_interval is not None
+                or auto_drift_min_pause is not None
+                or auto_drift_background is not None):
+            self.configure_auto_drift(
+                enabled=True if auto_drift is None else auto_drift,
+                interval=auto_drift_interval,
+                min_pause=auto_drift_min_pause,
+                background=auto_drift_background,
+            )
         # Start the sender up front so the first send_event() -- which may
         # well be inside a flip callback -- does not pay the thread-start
         # cost. _ensure_event_sender() remains as a safety net.
         self._start_event_sender()
+        # A header line so a log file is self-describing: which amplifier,
+        # which settings, which package version produced these records.
+        self._append_error_log({
+            'record': 'session_start',
+            'ntp_ip': ntp_ip,
+            'drift_correction': self._drift_correction,
+            'drift_min_samples': self._drift_min_samples,
+            'drift_min_span': self._drift_min_span,
+            'drift_max_delay': self._drift_max_delay,
+            'drift_max_residual': self._drift_max_residual,
+            'drift_window': self._drift_window,
+            'drift_samples_per_call': self._drift_samples_per_call,
+            'drift_slew': self._drift_slew,
+            'drift_max_model_age': self._drift_max_model_age,
+            'clock': None,
+        })
         if handshake:
             self._command('Query', self._endian)
             self._command('Attention')
@@ -457,16 +510,13 @@ class NetStation(object):
     
     
     @check_connected
-    def resync_do_not_use_not_recommended(self):
-        """Backward-compatible alias for resync()."""
-        return self.resync()
-
-    @check_connected
     def disconnect(self) -> None:
         """Close the TCP/IP connection.
 
         Any queued asynchronous events are flushed before the socket closes.
         """
+        self._stop_auto_drift_thread()
+        self._warn_if_undersampled()
         self.flush_events()
         self._stop_event_sender()
         if self._event_errors:
@@ -628,7 +678,15 @@ class NetStation(object):
             start, duration, event_type, label, desc, data
         )
         with self._io_lock:
-            return self._command('EventData', packaged)
+            return self._command(
+                'EventData',
+                packaged,
+                context={
+                    'event_type': event_type,
+                    'label': label,
+                    'start': start,
+                },
+            )
 
     def _ensure_event_sender(self) -> None:
         """Start the background sender if it is not already running.
@@ -675,16 +733,23 @@ class NetStation(object):
                     # Never let one bad event kill the sender thread. Record
                     # it so the experiment can check event_errors() later.
                     record = {
+                        'record': 'event_send_failure',
                         'time': time.time(),
                         'error': f'{type(err).__name__}: {err}',
                         'event_type': kwargs.get('event_type'),
+                        'label': kwargs.get('label'),
+                        'start': kwargs.get('start'),
                     }
                     with self._clock_lock:
-                        self._event_errors.append(record)
+                        self._event_errors.append(dict(record))
                     logger.error(
                         'Asynchronous ECI event send failed: %s',
                         record['error'],
                     )
+                    # This is the failure an experiment is most likely to
+                    # hit, and it cannot be raised to the caller, so it has
+                    # to reach the error log.
+                    self._append_error_log(record)
             finally:
                 self._event_queue.task_done()
 
@@ -1015,18 +1080,38 @@ class NetStation(object):
         enabled: bool = True,
         interval: float = None,
         min_pause: float = None,
+        background: bool = None,
     ) -> dict:
-        """Configure the schedule used by ``sample_drift_if_due()``.
+        """Configure automatic NTP drift sampling.
 
         Parameters
         ----------
         enabled:
-            Whether ``sample_drift_if_due()`` may take samples at all.
+            Whether drift samples may be taken at all.
         interval:
             Target seconds between drift samples.
         min_pause:
             Minimum idle time, in seconds, an experiment must be able to
-            offer before a sample is taken.
+            offer before a sample is taken. Only used by
+            ``sample_drift_if_due()``.
+        background:
+            Who does the sampling.
+
+            False (default) means the experiment must call
+            ``sample_drift_if_due()`` from a point it knows is safe -- an
+            inter-trial interval, say. The package owns the schedule, the
+            experiment owns the timing-safety window. **Nothing samples on
+            its own: if that call is never made, no samples are collected
+            and drift correction never engages.**
+
+            True starts a background thread that samples on the interval
+            with no cooperation required. The NTP query runs outside every
+            lock, so it cannot block ``getTime()`` by more than a few
+            microseconds, but its network wakeup can still land near a
+            screen flip. Prefer False for visual experiments that have
+            usable inter-trial intervals, and True for everything else --
+            especially anything long-running where a forgotten call would
+            quietly cost you drift correction entirely.
         """
         with self._clock_lock:
             self._auto_drift_enabled = enabled
@@ -1038,17 +1123,95 @@ class NetStation(object):
                 if min_pause < 0:
                     raise ValueError('min_pause must be non-negative')
                 self._auto_drift_min_pause = min_pause
+            if background is not None:
+                self._auto_drift_background = background
+        # Started outside the lock: the thread takes _clock_lock itself.
+        if self._auto_drift_enabled and self._auto_drift_background:
+            self._start_auto_drift_thread()
+        else:
+            self._stop_auto_drift_thread()
+        with self._clock_lock:
             return {
                 'enabled': self._auto_drift_enabled,
                 'interval': self._auto_drift_interval,
                 'min_pause': self._auto_drift_min_pause,
+                'background': self._auto_drift_background,
             }
+
+    def _warn_if_undersampled(self) -> None:
+        """Warn when auto-drift was enabled but nothing ever sampled.
+
+        configure_auto_drift() only records a schedule. With background
+        sampling off, sample_drift_if_due() is the only thing that acts on
+        it, so an experiment that enables auto-drift and never calls it
+        collects nothing and silently loses drift correction. This is the
+        one place that can notice.
+        """
+        with self._clock_lock:
+            if not self._auto_drift_enabled or self._auto_drift_background:
+                return
+            if self._sync_monotonic is None:
+                return
+            elapsed = time.monotonic() - self._sync_monotonic
+            expected = elapsed / self._auto_drift_interval
+            actual = len(self._drift_history)
+            if expected < 4 or actual >= expected * 0.25:
+                return
+        logger.warning(
+            'Auto-drift was enabled but only %d NTP sample(s) were '
+            'collected in %.0f s, where the %.0f s interval implies about '
+            '%.0f. sample_drift_if_due() is what actually takes a sample; '
+            'call it from an inter-trial interval, or use '
+            'configure_auto_drift(background=True).',
+            actual, elapsed, self._auto_drift_interval, expected,
+        )
+        self._append_error_log({
+            'record': 'drift_undersampled',
+            'samples_collected': actual,
+            'samples_expected': expected,
+            'elapsed': elapsed,
+            'interval': self._auto_drift_interval,
+            'clock': None,
+        })
+
+    def _start_auto_drift_thread(self) -> None:
+        if self._auto_drift_thread is not None:
+            return
+        self._auto_drift_stop.clear()
+        self._auto_drift_thread = threading.Thread(
+            target=self._auto_drift_loop,
+            name='eci-drift-sampler',
+            daemon=True,
+        )
+        self._auto_drift_thread.start()
+
+    def _stop_auto_drift_thread(self) -> None:
+        if self._auto_drift_thread is None:
+            return
+        self._auto_drift_stop.set()
+        self._auto_drift_thread.join(timeout=5.0)
+        self._auto_drift_thread = None
+
+    def _auto_drift_loop(self) -> None:
+        while not self._auto_drift_stop.wait(self._auto_drift_interval):
+            if not (self._auto_drift_enabled and self._auto_drift_background):
+                continue
+            if not self._connected or self._syncepoch is None:
+                continue
+            try:
+                self.sample_drift()
+            except Exception as err:
+                logger.error(
+                    'Background NTP drift sample failed: %s: %s',
+                    type(err).__name__, err,
+                )
 
     @check_connected
     def set_drift_stability(
         self,
         slew: float = None,
         max_model_age: float = None,
+        stall_after: int = None,
     ) -> dict:
         """Tune how the corrector tracks the measured NTP offset level.
 
@@ -1065,6 +1228,11 @@ class NetStation(object):
             anchor. Past this age the correction holds its last value
             instead of extrapolating an increasingly stale rate. Use 0 for
             unbounded extrapolation.
+        stall_after:
+            Number of consecutive rejected fits, after the model has once
+            engaged, before a ``drift_model_stalled`` record is logged. A
+            stalled model keeps extrapolating its last accepted slope, so
+            this is the only warning that timing error is accumulating.
         """
         with self._clock_lock:
             if slew is not None:
@@ -1079,9 +1247,14 @@ class NetStation(object):
                 self._drift_max_model_age = (
                     None if max_model_age == 0 else max_model_age
                 )
+            if stall_after is not None:
+                if stall_after < 1:
+                    raise ValueError('stall_after must be at least 1')
+                self._drift_stall_after = stall_after
             return {
                 'slew': self._drift_slew,
                 'max_model_age': self._drift_max_model_age,
+                'stall_after': self._drift_stall_after,
             }
 
     @check_connected
@@ -1260,6 +1433,9 @@ class NetStation(object):
                 'predicted_ntp_offset': drift.get('predicted_offset'),
                 'drift_accepted_fits': self._drift_accepted_fits,
                 'drift_rejected_fits': self._drift_rejected_fits,
+                'drift_consecutive_rejections':
+                    self._drift_consecutive_rejections,
+                'drift_stalled': self._drift_stalled,
                 'drift_last_reject_reason': self._drift_last_reject_reason,
                 'drift_slew': self._drift_slew,
                 'drift_max_model_age': self._drift_max_model_age,
@@ -1337,8 +1513,127 @@ class NetStation(object):
             return self._drift_model
 
         self._drift_model = self._fit_ntp_drift_regression()
+        # Clear the dirty flag before noting the transition. The transition
+        # record reads drift state, and any path back into this method
+        # would otherwise refit and recurse without end.
         self._drift_model_dirty = False
+        self._note_drift_transition(self._drift_model)
         return self._drift_model
+
+    def _drift_transition_context(self) -> dict:
+        """Drift fields for a transition record.
+
+        Reads attributes directly rather than calling clock_state(), which
+        would re-enter the regression path this is called from.
+        """
+        active = self._drift_active_model
+        last = self._drift_history[-1] if self._drift_history else {}
+        # Anchor the record to the sample that triggered the refit rather
+        # than to a fresh clock read. The transition is a statement about
+        # the fit, and the fit is made of samples.
+        elapsed = last.get('elapsed')
+        if elapsed is None and self._sync_monotonic is not None:
+            elapsed = time.monotonic() - self._sync_monotonic
+        model_age = None
+        if active is not None and elapsed is not None:
+            model_age = elapsed - active['anchor_elapsed']
+        return {
+            'elapsed': elapsed,
+            'drift_samples': len(self._drift_history),
+            'drift_accepted_fits': self._drift_accepted_fits,
+            'drift_rejected_fits': self._drift_rejected_fits,
+            'drift_consecutive_rejections': self._drift_consecutive_rejections,
+            'drift_last_reject_reason': self._drift_last_reject_reason,
+            'active_slope': None if active is None else active['slope'],
+            'active_slope_ms_per_hour': (
+                None if active is None else active['slope'] * 3.6e6
+            ),
+            'drift_model_age': model_age,
+            'extrapolation_frozen': (
+                model_age is not None
+                and self._drift_max_model_age is not None
+                and model_age > self._drift_max_model_age
+            ),
+            'sys_mono_skew': last.get('sys_mono_skew'),
+            'last_sample_delay': last.get('delay'),
+        }
+
+    def _note_drift_transition(self, estimate) -> None:
+        """Log when the drift model engages, stalls, or recovers.
+
+        A stalled model is silent by construction: fits are refused, the
+        last accepted slope keeps being extrapolated, and nothing else goes
+        wrong until the timing error has grown. These records make that
+        visible while it is happening rather than afterwards.
+        """
+        if estimate is None:
+            self._drift_consecutive_rejections += 1
+            # Startup rejections are expected, not a stall.
+            if self._drift_accepted_fits == 0 or self._drift_stalled:
+                return
+            if self._drift_consecutive_rejections < self._drift_stall_after:
+                return
+            self._drift_stalled = True
+            context = self._drift_transition_context()
+            self._drift_stall_started_elapsed = context['elapsed']
+            logger.warning(
+                'NTP drift model stalled: %d consecutive rejected fits '
+                '(%s). The last accepted slope is still being extrapolated; '
+                'timing error will grow until a fit is accepted.',
+                self._drift_consecutive_rejections,
+                self._drift_last_reject_reason,
+            )
+            self._append_error_log(dict(
+                context, record='drift_model_stalled', clock=None,
+            ))
+            return
+
+        first_fit = self._drift_accepted_fits == 0
+        was_stalled = self._drift_stalled
+        rejections = self._drift_consecutive_rejections
+        self._drift_consecutive_rejections = 0
+        self._drift_stalled = False
+
+        if first_fit:
+            context = self._drift_transition_context()
+            context['active_slope'] = estimate['slope']
+            context['active_slope_ms_per_hour'] = estimate['slope'] * 3.6e6
+            logger.info(
+                'NTP drift correction engaged: slope %.2f ms/hour from %d '
+                'samples over %.0f s.',
+                estimate['slope'] * 3.6e6, estimate['sample_count'],
+                estimate['span'],
+            )
+            self._append_error_log(dict(
+                context,
+                record='drift_model_engaged',
+                model_samples=estimate['sample_count'],
+                model_span=estimate['span'],
+                clock=None,
+            ))
+            return
+
+        if was_stalled:
+            context = self._drift_transition_context()
+            started = self._drift_stall_started_elapsed
+            duration = (
+                None if started is None or context['elapsed'] is None
+                else context['elapsed'] - started
+            )
+            self._drift_stall_started_elapsed = None
+            logger.warning(
+                'NTP drift model recovered after %s s and %d rejected fits.',
+                'unknown' if duration is None else f'{duration:.0f}',
+                rejections,
+            )
+            self._append_error_log(dict(
+                context,
+                record='drift_model_recovered',
+                stall_duration=duration,
+                rejected_during_stall=rejections,
+                new_slope_ms_per_hour=estimate['slope'] * 3.6e6,
+                clock=None,
+            ))
 
     def _reject_fit(self, reason: str):
         self._drift_last_reject_reason = reason
@@ -1636,16 +1931,46 @@ class NetStation(object):
             'raw_display': self._format_bytes(bytearr),
         }
 
+    def _clock_snapshot(self) -> dict:
+        """Best-effort clock/drift state for attaching to an error record.
+
+        Errors are rare, so paying for a full state snapshot is worth it:
+        knowing the drift model was stale, or that fits had been rejected
+        for ten minutes, is usually what explains the failure. Never raises
+        -- a diagnostic must not become a second failure.
+        """
+        try:
+            return self.clock_state()
+        except Exception as err:
+            return {'clock_state_error': f'{type(err).__name__}: {err}'}
+
+    def _append_error_log(self, record: dict) -> None:
+        """Append one JSON-lines record. Never raises into the caller."""
+        if not self._error_log:
+            return
+        record.setdefault('time', time.time())
+        record.setdefault('clock', self._clock_snapshot())
+        try:
+            Path(self._error_log).parent.mkdir(parents=True, exist_ok=True)
+            with open(self._error_log, 'a', encoding='utf-8') as logfile:
+                logfile.write(json.dumps(record, sort_keys=True, default=str)
+                              + '\n')
+        except Exception as err:
+            # Losing the log is bad; losing the recording is worse.
+            logger.error(
+                'Could not write to error log %s: %s: %s',
+                self._error_log, type(err).__name__, err,
+            )
+
     def _write_error_log(
         self,
         cmd: str,
         bytearr: bytes,
         err: Exception,
+        context: dict = None,
     ) -> None:
-        if not self._error_log:
-            return
         record = {
-            'time': time.time(),
+            'record': 'eci_response_error',
             'cmd': cmd,
             'error': type(err).__name__,
             'message': getattr(err, 'message', str(err)),
@@ -1653,15 +1978,16 @@ class NetStation(object):
             'raw_hex': binascii.hexlify(bytearr).decode('ascii'),
             'raw_display': self._format_bytes(bytearr),
         }
-        Path(self._error_log).parent.mkdir(parents=True, exist_ok=True)
-        with open(self._error_log, 'a', encoding='utf-8') as logfile:
-            logfile.write(json.dumps(record, sort_keys=True) + '\n')
+        if context:
+            record.update(context)
+        self._append_error_log(record)
 
     def _log_unexpected_response(
         self,
         cmd: str,
         bytearr: bytes,
         err: Exception,
+        context: dict = None,
     ) -> None:
         logger.warning(
             'Unexpected ECI response for %s: %s; raw=%s',
@@ -1669,13 +1995,14 @@ class NetStation(object):
             getattr(err, 'message', str(err)),
             self._format_bytes(bytearr),
         )
-        self._write_error_log(cmd, bytearr, err)
+        self._write_error_log(cmd, bytearr, err, context)
 
     def _log_response_failure(
         self,
         cmd: str,
         bytearr: bytes,
         err: Exception,
+        context: dict = None,
     ) -> None:
         logger.error(
             'ECI response failure for %s: %s; raw=%s',
@@ -1683,7 +2010,7 @@ class NetStation(object):
             getattr(err, 'message', str(err)),
             self._format_bytes(bytearr),
         )
-        self._write_error_log(cmd, bytearr, err)
+        self._write_error_log(cmd, bytearr, err, context)
 
     def _read_response_token(self) -> bytes:
         if not self._response_tokens:
@@ -1700,6 +2027,7 @@ class NetStation(object):
         cmd: str,
         data=None,
         strict: bool = True,
+        context: dict = None,
     ) -> Union[bool, float, int, dict]:
         """Send a command to the amplifier; please do not use as this is
         internal.
@@ -1709,6 +2037,8 @@ class NetStation(object):
         cmd: the command to send
         data: the data to send with it
         strict: raise ECI response parsing exceptions when True
+        context: optional fields to attach to any error-log record, so a
+            failure can be traced back to the event that caused it
 
         Returns
         -------
@@ -1734,11 +2064,11 @@ class NetStation(object):
                 parsed = parse_response(response)
             except InvalidECIResponse as err:
                 self._debug_rx_error(response, err)
-                self._log_unexpected_response(cmd, response, err)
+                self._log_unexpected_response(cmd, response, err, context)
                 return self._response_record(response, err)
             except ECIResponseFailure as err:
                 self._debug_rx_error(response, err)
-                self._log_response_failure(cmd, response, err)
+                self._log_response_failure(cmd, response, err, context)
                 if strict:
                     raise
                 return self._response_record(response, err)
