@@ -95,16 +95,15 @@ Event types must be exactly four ASCII characters. The default
 # Integrating With Your Own PsychoPy Experiment
 
 Send markers straight from `win.callOnFlip()`. The package handles the
-threading, the timestamp capture, and the flushing — asynchronous sending
-is on by default, so there is nothing to configure.
+threading, the timestamp capture, and the flushing. `send_event()` is
+non-blocking, so there is nothing to configure.
 
 ```python
 from psychopy import visual, core
 from egi_pynetstation import NetStation
 
 ns = NetStation('10.10.10.42', 55513)
-ns.connect(ntp_ip='10.10.10.51')
-ns.configure_auto_drift(enabled=True, interval=15.0)
+ns.connect(ntp_ip='10.10.10.51', auto_drift=True, auto_drift_interval=15.0)
 
 win = visual.Window(fullscr=True, screen=1, color='black')
 stim = visual.TextStim(win, text='+')
@@ -164,27 +163,32 @@ forgets to disconnect still delivers what it queued. Call
 `ns.flush_events()` yourself only if you need a synchronisation point
 mid-experiment.
 
-## Blocking When You Want To
+## Mixing Flip Markers and Ordinary Markers
 
-`async_events` sets the *default* for a connection; `wait` overrides it for
-a single call. Both compose in both directions:
+There is one setting, and you rarely need it. `send_event()` never blocks;
+`send_event(wait=True)` blocks and returns the parsed ECI response.
 
-| | `send_event()` | `send_event(wait=True)` | `send_event(wait=False)` |
-| --- | --- | --- | --- |
-| `async_events=True` (default) | non-blocking, returns `None` | blocks, returns ECI response | non-blocking |
-| `async_events=False` | blocks, returns ECI response | blocks | non-blocking |
+That means both usages are the same call and can be mixed freely:
 
-So a synchronous connection can still fire one event without waiting, and
-an asynchronous connection can still ask for one response. The background
-sender starts on first use, so `wait=False` works even if you never asked
-for asynchronous sending at connect time.
+```python
+# visual onset: timestamped at the flip
+win.callOnFlip(ns.send_event, event_type='stm+')
+win.flip()
 
-Use `async_events=False` for a diagnostic console, or any code that
-inspects what the amplifier replied — `example2.py` does exactly this. Do
-**not** use it in a visual experiment: a synchronous send blocks the flip
-callback for a full network round trip. Measured on the reference setup,
-that is about 56 us asynchronous versus 7.6 ms synchronous, and the
-blocking version pushes the following frame.
+# response marker: timestamped at this line
+ns.send_event(event_type='resp', desc=f'key={key}')
+```
+
+Neither blocks, both capture their timestamp on the calling thread, and
+order is preserved. The only difference is *which moment* each one marks —
+the flip, or the line of code. Use `callOnFlip` when the marker must line
+up with what the participant saw; call it directly for anything else.
+
+Pass `wait=True` when you actually need the amplifier's reply — a
+diagnostic console, or checking that a command was accepted. Do **not** use
+it inside a flip callback: on the reference setup a non-blocking send takes
+about 56 us and a blocking one 7.6 ms, and the blocking version pushes the
+following frame.
 
 ## Drift Sampling
 
@@ -192,12 +196,40 @@ Drift samples are NTP queries. They do **not** send ECI clock-sync commands
 and do not create markers. They do block the calling thread for roughly
 170 ms at default settings, so they must not land near a flip.
 
-Let the package own the schedule and your experiment own the safety window:
+**`configure_auto_drift()` only records a schedule — nothing polls it.**
+`sample_drift_if_due()` is the only thing that acts on it, so an experiment
+that enables auto-drift and never calls it collects no samples at all, and
+drift correction never engages. There are two ways to arrange the sampling.
+
+**Cooperative (default).** The package owns the schedule, your experiment
+owns the timing-safety window:
 
 ```python
-ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35)
+ns.connect(ntp_ip=..., auto_drift=True, auto_drift_interval=15.0,
+           auto_drift_min_pause=0.35)
 ns.sample_drift_if_due(available_pause=iti_remaining)   # in your ITI
 ```
+
+**Background.** The package samples on its own, no cooperation needed:
+
+```python
+ns.connect(ntp_ip=..., auto_drift=True, auto_drift_background=True)
+```
+
+Either can also be set after connecting, or changed mid-session, with
+`ns.configure_auto_drift(enabled=True, interval=15.0, background=False)`.
+
+The NTP query runs outside every lock, so a background sample cannot block
+`getTime()` by more than a few microseconds. What it *can* do is put a
+network wakeup near a screen flip. Prefer the cooperative form for visual
+experiments with usable inter-trial intervals, and background for anything
+else — especially long runs, where a forgotten call would quietly cost you
+drift correction for the whole session.
+
+If auto-drift is enabled, sampling is cooperative, and far fewer samples
+were collected than the interval implies, `disconnect()` logs a warning and
+writes a `drift_undersampled` record. That is the safety net, not a
+substitute for arranging the sampling.
 
 `available_pause` is how much idle time you can safely give up. If a sample
 is not due yet, or the pause you offered is too short, the call returns
@@ -272,10 +304,10 @@ instructions so the model is live before your first trial.
 | Script | What it is |
 | --- | --- |
 | [`example3_stroop.py`](example3_stroop.py) | A complete Stroop task. **Start here** if you are writing an experiment. |
-| [`psychopy_demo.py`](psychopy_demo.py) | The smallest possible PsychoPy loop, in the style of the bundled PsychoPy hardware demos. |
+| [`example4_psychopydemo.py`](example4_psychopydemo.py) | The smallest possible PsychoPy loop, in the style of the bundled PsychoPy hardware demos. |
 | [`example.py`](example.py) | Non-visual: connect, send timed events, disconnect. No PsychoPy needed. |
 | [`example2.py`](example2.py) | Interactive ECI console and scripted diagnostics. See [Diagnostics](#diagnostics). |
-| [`psychopy_photocell_drift.py`](psychopy_photocell_drift.py) | Timing validation against a photocell. See [PsychoPy Photocell Test](#psychopy-photocell-test). |
+| [`example5_psychopy_photocell_drift.py`](example5_psychopy_photocell_drift.py) | Timing validation against a photocell. See [PsychoPy Photocell Test](#psychopy-photocell-test). |
 
 ## Stroop Example
 
@@ -455,6 +487,7 @@ Stability controls:
 ns.set_drift_stability(
     slew=0.0002,          # max seconds of level correction per second elapsed
     max_model_age=600.0,  # stop extrapolating a fit after this many seconds
+    stall_after=5,        # consecutive rejected fits before logging a stall
 )
 ```
 
@@ -539,7 +572,7 @@ filter settings change.
 This repository includes a timing validation script:
 
 ```bash
-caffeinate -dis python psychopy_photocell_drift.py amp \
+caffeinate -dis python example5_psychopy_photocell_drift.py amp \
   --fullscreen \
   --screen 1 \
   --duration 3600 \
@@ -595,7 +628,7 @@ For Windows users, or anyone who prefers launching from PsychoPy
 Coder/Runner:
 
 ```text
-psychopy_photocell_drift_gui.py
+example5_psychopy_photocell_drift_gui.py
 ```
 
 Open that file in PsychoPy and press Run. A startup dialog asks for the same
@@ -630,7 +663,7 @@ after stimuli. This is diagnostic only and is not a recommended production
 timing mode:
 
 ```bash
-python psychopy_photocell_drift.py amp --fullscreen --ntpsync-every 5 \
+python example5_psychopy_photocell_drift.py amp --fullscreen --ntpsync-every 5 \
   --log photocell_ntpsync_every5.csv
 ```
 
@@ -679,6 +712,78 @@ python example2.py amp --no-drift-correction
 
 ---
 
+# Error Log
+
+Pass `error_log` when constructing the station to get a JSON-lines record
+of anything that goes wrong, for reading after a session:
+
+```python
+ns = NetStation('10.10.10.42', 55513, error_log='session_errors.jsonl')
+```
+
+It can also be set or changed later with `ns.set_error_log(path)`. Parent
+directories are created for you. If the path turns out to be unwritable the
+failure is logged through Python's `logging` and the recording continues —
+losing the log is bad, losing the recording is worse.
+
+Three kinds of record are written, each tagged with a `record` field:
+
+| `record` | Written when |
+| --- | --- |
+| `session_start` | `connect()` succeeds. Captures the drift settings in force, so a log file says what produced it. |
+| `eci_response_error` | The amplifier returned something unparseable or an error. Includes `cmd`, the raw bytes as `raw_hex` and a printable `raw_display`, and — for events — `event_type`, `label`, and `start`. |
+| `event_send_failure` | An asynchronous send raised. Includes `event_type`, `label`, and `start`. |
+| `drift_model_engaged` | Drift correction became active for the first time. Records the fitted slope, sample count, and span. |
+| `drift_model_stalled` | Fits have been rejected `stall_after` times in a row (default 5) after the model had engaged. |
+| `drift_model_recovered` | A fit was accepted again. Records `stall_duration` and `rejected_during_stall`. |
+| `drift_undersampled` | Auto-drift was enabled but almost nothing was sampled — usually a missing `sample_drift_if_due()` call. |
+
+The drift records close a real blind spot. A stalled model is silent by
+construction: fits are refused, the last accepted slope keeps being
+extrapolated, and nothing raises until the timing error has already grown.
+In one hour-long validation run this went unnoticed for 15 minutes and cost
+about 17 ms. Now it is one line while it is happening:
+
+```json
+{"record": "drift_model_stalled", "elapsed": 330.0,
+ "drift_consecutive_rejections": 3, "drift_last_reject_reason": "high_residual",
+ "drift_model_age": 45.0, "extrapolation_frozen": false,
+ "active_slope_ms_per_hour": 36.0}
+```
+
+Startup rejections — too few samples, span too short — are normal and are
+never reported as a stall. Tune the threshold with
+`ns.set_drift_stability(stall_after=5)`, and check `drift_stalled` or
+`drift_consecutive_rejections` in `clock_state()` at runtime.
+
+`event_send_failure` matters most in practice. Asynchronous sending is the
+default, and an async failure cannot be raised into your experiment code,
+so the log file is where you find out it happened. The same records are
+available at runtime from `ns.event_errors()`.
+
+Every failure record carries a **`clock` snapshot** — the full
+`clock_state()` at the moment of the error. That is usually what explains
+it: whether the drift model was stale, how long fits had been rejected,
+what the system-versus-monotonic skew was doing. Reading a log is much
+faster than reproducing the failure.
+
+```python
+import json
+
+for line in open('session_errors.jsonl'):
+    r = json.loads(line)
+    if r['record'] == 'event_send_failure':
+        print(r['event_type'], r['error'],
+              'model age:', r['clock']['drift_model_age'],
+              'rejected fits:', r['clock']['drift_rejected_fits'])
+```
+
+Note that an unparseable response is *reported*, not raised: `send_event()`
+with `wait=True` returns a diagnostic dictionary with `ok: False` rather
+than throwing, so a single bad reply cannot end a recording.
+
+---
+
 # Settings Reference
 
 These settings control the client-side drift corrector. They do not change the
@@ -698,7 +803,10 @@ happens only when user code calls `ns.sample_drift()` or
 | `drift_sample_spacing` | `0.05` s | Seconds between queries within one burst. |
 | `drift_slew` | `0.0002` | Maximum seconds of level correction retired per second elapsed. `0` applies instantly. |
 | `drift_max_model_age` | `600.0` s | Stop extrapolating a fitted slope after this age; the correction then holds. `0` is unbounded. |
-| `async_events` | `True` | Send events from a background thread so `send_event()` is safe inside a flip callback. Set `False` only for diagnostics that need the ECI response. |
+| `auto_drift` | off | Enable automatic drift sampling from `connect()`. |
+| `auto_drift_interval` | `60.0` s | Target seconds between drift samples. |
+| `auto_drift_min_pause` | `0.5` s | Minimum idle time before a cooperative sample is taken. |
+| `auto_drift_background` | `False` | Sample from a package-owned thread rather than requiring `sample_drift_if_due()`. |
 
 Auto-drift scheduling:
 
@@ -706,21 +814,21 @@ Auto-drift scheduling:
 | --- | ---: | --- |
 | `enabled` | `False` | Whether `sample_drift_if_due()` may sample at all. |
 | `interval` | `60.0` s | Target seconds between drift samples. |
-| `min_pause` | `0.5` s | Minimum idle time an experiment must offer before a sample is taken. |
+| `min_pause` | `0.5` s | Minimum idle time an experiment must offer before a sample is taken. Cooperative sampling only. |
+| `background` | `False` | Sample from a package-owned thread instead of requiring `sample_drift_if_due()` calls. |
 
 ## API Summary
 
 ```python
 # Connection
-ns.connect(ntp_ip=..., drift_correction=True, ...)   # async_events=True
+ns.connect(ntp_ip=..., drift_correction=True, auto_drift=True, ...)
 ns.begin_rec()
 ns.end_rec()          # flushes queued events
 ns.disconnect()       # flushes queued events, stops the sender
 
 # Events
 ns.send_event(start='now', event_type='stm+', label='stm+')
-ns.send_event(..., wait=True)         # force one blocking send
-ns.send_event(..., wait=False)        # force one non-blocking send
+ns.send_event(..., wait=True)         # block and return the ECI response
 ns.flush_events(timeout=None)         # block until the queue drains
 ns.event_errors()                     # failures from asynchronous sends
 ns.getTime()                          # timestamp for right now
@@ -729,7 +837,8 @@ ns.time_at_monotonic(monotonic_time)  # timestamp for a captured reading
 # Drift sampling
 ns.sample_drift(samples=None, spacing=None)
 ns.sample_drift_if_due(available_pause=None)
-ns.configure_auto_drift(enabled=True, interval=60.0, min_pause=0.5)
+ns.configure_auto_drift(enabled=True, interval=60.0, min_pause=0.5,
+                        background=False)
 ns.set_drift_sampling(samples=4, spacing=0.05)
 
 # Drift model
@@ -737,7 +846,7 @@ ns.set_drift_correction(True)
 ns.set_drift_requirements(min_samples=13, min_span=180.0)
 ns.set_drift_model_options(max_delay=0.010, max_residual=0.003,
                            window_minutes=15.0)
-ns.set_drift_stability(slew=0.0002, max_model_age=600.0)
+ns.set_drift_stability(slew=0.0002, max_model_age=600.0, stall_after=5)
 ns.refresh_drift_model()
 
 # Inspection
@@ -745,3 +854,16 @@ ns.drift_history()
 ns.drift_estimate()
 ns.clock_state()
 ```
+
+## License
+
+This software is a United States Government Work. It was developed by NIH
+employees as part of their official duties and, under 17 U.S.C. § 105, is in
+the public domain within the United States. Outside the United States, and for
+contributions by non-Government authors, it is licensed under the MIT License.
+See [LICENSE](LICENSE) for the full text.
+
+Attribution cannot be required of a public domain work, so this is a request
+rather than a condition — but it is a sincere one. If `egi-pynetstation`
+supports your research, please cite it and acknowledge the authors and the NIH
+Section on Functional Imaging Methods in any derived software or publications.

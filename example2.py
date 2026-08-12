@@ -36,10 +36,6 @@ def connect_with_drift_options(
         ns.connect(
             ntp_ip=ntp_ip,
             handshake=handshake,
-            # This is a diagnostic console: it prints the parsed ECI
-            # response for every command, so events must be sent
-            # synchronously. Experiments should keep the async default.
-            async_events=False,
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
@@ -57,7 +53,6 @@ def connect_with_drift_options(
                 'drift_max_delay',
                 'drift_max_residual',
                 'drift_window_minutes',
-                'async_events',
             )
         ):
             raise
@@ -532,10 +527,14 @@ def main() -> None:
     def send_event_code(event_type: str, label: str = None):
         if len(event_type) != 4:
             raise ValueError('event_code requires exactly 4 characters')
+        # This is a diagnostic console: it prints the parsed ECI response
+        # for every command, so this one send blocks. Experiments should
+        # use the non-blocking default.
         return ns.send_event(
             event_type=event_type,
             label=label or event_type,
             desc='Sent from example2.py experiment',
+            wait=True,
         )
 
     def configure_drift_window_interactive():

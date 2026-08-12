@@ -54,6 +54,7 @@ class NetStation(object):
     need to refer to docstrings, code comments, and the README in order
     to get the complete specification for NetStation behavior rather
     than the SDK guide. Notable deviations:
+
     - eci_NTPReturnClock *requires* an NTPv4 timecode, even though in
       the documentation "Experimental Control Interface (ECI) Commands
       and Return Values" table, "Follows controller command if more
@@ -86,11 +87,17 @@ class NetStation(object):
 
         Parameters
         ----------
-        ipv4: the ipv4 address to use for the amplifier
-        port: the port number to use for the amplifier
-        endian: the endianness of the machine; see eci.allowed_endians
-        debug: print ECI command and response bytes when True
-        error_log: optional path for JSON-lines ECI error records
+        ipv4 : str
+            The IPv4 address to use for the amplifier.
+        port : int
+            The port number to use for the amplifier.
+        endian : str
+            The endianness of the machine; see ``eci.allowed_endians``.
+        debug : bool
+            Print ECI command and response bytes when True.
+        error_log : str, optional
+            Path for JSON-lines ECI error records. See the Diagnostics
+            page for the record formats.
 
 
         See Also
@@ -165,7 +172,8 @@ class NetStation(object):
 
         Parameters
         ----------
-        func: a function which has no parameters
+        func : callable
+            The method to guard.
 
         Raises
         ------
@@ -231,35 +239,54 @@ class NetStation(object):
 
         Parameters
         ----------
-        clock: either 'ntp' or 'simple', indicating clock sync method
-        ntp_ip: the IP address of the NTP server on the amplifier
-        handshake: send Query and Attention immediately after connecting
-        drift_correction: enable client-side drift correction for getTime()
-        drift_min_samples: optional minimum number of NTP samples needed before
-            applying drift correction
-        drift_min_span: optional minimum sample window, in seconds, needed
-            before applying drift correction
-        drift_max_delay: optional maximum NTP round-trip delay, in seconds,
-            for samples used by the drift model
-        drift_max_residual: optional maximum absolute model residual, in
-            seconds, before a fitted drift line is rejected
-        drift_window_minutes: optional rolling window, in minutes, used by the
-            drift model. Use 0 to fit all valid drift samples.
-        drift_samples: optional number of NTP queries per drift sample; the
-            lowest-delay reply in the burst is kept
-        drift_sample_spacing: optional seconds between queries within a burst
-        drift_slew: optional maximum rate, in seconds of correction per second
-            of elapsed time, at which level errors are retired
-        drift_max_model_age: optional maximum seconds a fitted slope may be
-            extrapolated past its anchor; 0 for unbounded
-        auto_drift: enable automatic NTP drift sampling. Equivalent to
-            calling configure_auto_drift() after connecting
-        auto_drift_interval: target seconds between drift samples
-        auto_drift_min_pause: minimum idle time an experiment must offer
-            before a cooperative sample is taken
-        auto_drift_background: sample from a package-owned thread instead of
-            requiring sample_drift_if_due() calls. See configure_auto_drift()
-            for the tradeoff
+        clock : str
+            Either ``'ntp'`` or ``'simple'``, indicating the clock sync
+            method. Only ``'ntp'`` is currently implemented.
+        ntp_ip : str
+            The IPv4 address of the NTP server on the amplifier.
+        handshake : bool
+            Send Query and Attention immediately after connecting.
+        drift_correction : bool
+            Enable client-side drift correction for :meth:`getTime`.
+        drift_min_samples : int, optional
+            Minimum number of NTP samples needed before applying drift
+            correction.
+        drift_min_span : float, optional
+            Minimum sample window, in seconds, needed before applying
+            drift correction.
+        drift_max_delay : float, optional
+            Maximum NTP round-trip delay, in seconds, for samples used by
+            the drift model.
+        drift_max_residual : float, optional
+            Maximum absolute model residual, in seconds, before a fitted
+            drift line is rejected.
+        drift_window_minutes : float, optional
+            Rolling window, in minutes, used by the drift model. Use 0 to
+            fit all valid drift samples.
+        drift_samples : int, optional
+            Number of NTP queries per drift sample; the lowest-delay reply
+            is kept.
+        drift_sample_spacing : float, optional
+            Seconds between queries within one burst.
+        drift_slew : float, optional
+            Maximum rate, in seconds of correction per second of elapsed
+            time, at which level errors are retired.
+        drift_max_model_age : float, optional
+            Maximum seconds a fitted slope may be extrapolated past its
+            anchor. Use 0 for unbounded extrapolation.
+        auto_drift : bool, optional
+            Enable automatic NTP drift sampling. Equivalent to calling
+            :meth:`configure_auto_drift` after connecting. Passing any
+            other ``auto_drift_*`` argument implies this is True.
+        auto_drift_interval : float, optional
+            Target seconds between drift samples.
+        auto_drift_min_pause : float, optional
+            Minimum idle time an experiment must offer before a
+            cooperative sample is taken.
+        auto_drift_background : bool, optional
+            Sample from a package-owned thread instead of requiring
+            :meth:`sample_drift_if_due` calls. See
+            :meth:`configure_auto_drift` for the tradeoff.
 
         Raises
         ------
@@ -410,11 +437,13 @@ class NetStation(object):
 
         Parameters
         ----------
-        attention: send Attention immediately before NTPReturnClock. This
-        defaults to False because some Net Station configurations appear to
-        suppress the delayed timestamp response after Attention.
-        max_followups: number of resy events to send while waiting for the
-        delayed timestamp.
+        attention : bool
+            Send Attention immediately before NTPReturnClock. Defaults to
+            False because some Net Station configurations appear to
+            suppress the delayed timestamp response after Attention.
+        max_followups : int
+            Number of ``resy`` events to send while waiting for the
+            delayed timestamp.
         """
         with self._io_lock:
             if not self._ntp_ip:
@@ -612,12 +641,15 @@ class NetStation(object):
         means and use "event_type" as the main identifier by convention.
 
         The data to send has several restrictions, enumerated below:
+
         - The key values must be precisely 4 ASCII characters in length.
         - Data must be one of several types:
+
           - boolean
           - floating-point (will be double-precision)
           - integer (will be "long" precision)
           - string (ASCII characters only)
+
         - The dictionary representing the data must be shallow; no nested
           dictionaries.
 
@@ -833,7 +865,8 @@ class NetStation(object):
 
         Returns
         -------
-        Floating-point time of recording start
+        float
+            Time of recording start, from ``time.time()``.
         """
         return self._recording_start
 
@@ -842,7 +875,8 @@ class NetStation(object):
 
         Returns
         -------
-        The number of seconds since recording start
+        float
+            Seconds since recording start.
         """
         if self._recording_start is not None:
             return time.time() - self._recording_start
@@ -2042,7 +2076,8 @@ class NetStation(object):
 
         Returns
         -------
-        The server response
+        bool or float or int or dict
+            The parsed server response.
 
         Raises
         ------

@@ -9,10 +9,11 @@ markers to Net Station / Amp Server Pro with NTP-based event timing.
 
 Two behaviours do the work:
 
-  asynchronous sending (on by default) means send_event() captures the
-                      timestamp and returns immediately, so it is safe to
-                      call from win.callOnFlip(). The package sends on its
-                      own background thread. Pass async_events=False only
+  send_event()        never blocks. It captures the timestamp on the
+                      calling thread and returns in microseconds while a
+                      background thread does the socket write, so it is
+                      safe to call from win.callOnFlip() and equally safe
+                      from ordinary experiment code. Pass wait=True only
                       if you need the ECI response back.
 
   configure_auto_drift()  the package tracks when the next NTP drift
@@ -38,12 +39,14 @@ IP_amp = '10.10.10.51'  # amplifier / Net Station NTP server
 ns = NetStation(IP_ns, port_ns)
 ns.connect(
     ntp_ip=IP_amp,
-    drift_correction=True,  # default; async event sending is also default
+    drift_correction=True,   # default
+    # The package owns the sampling schedule; the experiment owns the
+    # timing safety window and calls sample_drift_if_due() below. Nothing
+    # is sampled without that call unless auto_drift_background=True.
+    auto_drift=True,
+    auto_drift_interval=15.0,
+    auto_drift_min_pause=0.35,
 )
-
-# The package owns the sampling schedule; the experiment owns the timing
-# safety window. min_pause is the shortest gap it may sample in.
-ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35)
 
 win = visual.Window(fullscr=True, screen=0, color='black', units='height')
 fixation = visual.TextStim(win, text='+', color='white', height=0.08)

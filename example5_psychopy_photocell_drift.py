@@ -31,7 +31,6 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
         ns.connect(
             ntp_ip=ntp_ip,
             handshake=True,
-            async_events=not args.sync_events,
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
@@ -42,6 +41,10 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_sample_spacing=args.drift_sample_spacing,
             drift_slew=args.drift_slew,
             drift_max_model_age=args.drift_max_model_age,
+            auto_drift=True,
+            auto_drift_interval=args.sample_interval,
+            auto_drift_min_pause=args.drift_min_pause,
+            auto_drift_background=args.drift_background,
         )
     except TypeError as err:
         # Fail loudly rather than silently validating different code. The
@@ -331,6 +334,25 @@ def build_parser() -> ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--drift-stall-after',
+        type=int,
+        default=5,
+        help=(
+            'Consecutive rejected drift fits, after the model has engaged, '
+            'before a drift_model_stalled record is logged'
+        ),
+    )
+    parser.add_argument(
+        '--drift-background',
+        action='store_true',
+        help=(
+            'Sample NTP drift from a background thread instead of during '
+            'inter-trial intervals. Removes the need for the experiment to '
+            'cooperate, at the cost of a network wakeup that may land near '
+            'a flip'
+        ),
+    )
+    parser.add_argument(
         '--drift-slew',
         type=float,
         default=0.0002,
@@ -370,8 +392,8 @@ def build_parser() -> ArgumentParser:
         '--sync-events',
         action='store_true',
         help=(
-            'Disable the package asynchronous sender so send_event() writes '
-            'to the socket inline. Use to measure what the sender is worth'
+            'Send events with wait=True so send_event() writes to the socket '
+            'inline. Use to measure what the background sender is worth'
         ),
     )
     parser.add_argument(
@@ -410,6 +432,8 @@ def main(argv=None) -> int:
         parser.error('--drift-max-model-age must be non-negative')
     if args.drift_min_pause < 0:
         parser.error('--drift-min-pause must be non-negative')
+    if args.drift_stall_after < 1:
+        parser.error('--drift-stall-after must be at least 1')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     send_mode = 'sync' if args.sync_events else 'async'
@@ -430,14 +454,16 @@ def main(argv=None) -> int:
         ns.send_command('BeginRecording')
         ns.ntpsync()
 
-        # The package owns the drift-sampling schedule; this script owns the
-        # timing-safety window and passes the real inter-trial gap.
-        ns.configure_auto_drift(
-            enabled=True,
-            interval=args.sample_interval,
-            min_pause=args.drift_min_pause,
-        )
+        # Auto-drift is configured in connect(). This script owns the
+        # timing-safety window and passes the real inter-trial gap to
+        # sample_drift_if_due() unless --drift-background is set.
+        ns.set_drift_stability(stall_after=args.drift_stall_after)
         print(f'Event send mode: {send_mode}')
+        print(
+            'Drift sampling: '
+            + ('background thread' if args.drift_background
+               else 'inter-trial intervals')
+        )
         print('Press q or escape to stop early; the log is still written.')
         if args.ntpsync_every:
             print(
@@ -549,6 +575,7 @@ def main(argv=None) -> int:
                         event_type='stm+',
                         label='stm+',
                         desc='white dot onset',
+                        wait=args.sync_events,
                     )
                 except Exception as err:
                     span_end = time.monotonic()
@@ -599,7 +626,8 @@ def main(argv=None) -> int:
                 )
             else:
                 available_pause = None
-            record_drift_sample_if_due(available_pause)
+            if not args.drift_background:
+                record_drift_sample_if_due(available_pause)
 
         ns.flush_events()
         log_drift_sample('drift_sample_end', ns.sample_drift())
@@ -616,6 +644,18 @@ def main(argv=None) -> int:
                 print('  ', item)
         else:
             print('Asynchronous event send errors: none')
+        state = ns.clock_state()
+        print(
+            f"\nDrift model: {state['drift_accepted_fits']} fits accepted, "
+            f"{state['drift_rejected_fits']} rejected"
+            + (f", STALLED ({state['drift_consecutive_rejections']} "
+               f"consecutive rejections)" if state['drift_stalled'] else '')
+        )
+        if state['drift_accepted_fits'] == 0:
+            print(
+                'WARNING: drift correction never engaged. Timestamps used '
+                'the initial NTP sync only.'
+            )
         print('Drift estimate:', ns.drift_estimate())
         return 0
     except KeyboardInterrupt:

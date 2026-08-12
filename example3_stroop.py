@@ -71,15 +71,20 @@ def main():
     # EGI 1: create the connection object.
     ns = NetStation(IP_NETSTATION, ECI_PORT)
 
-    # EGI 2: connect. Events are sent from a background thread by default,
-    # which is what lets send_event() be called from a flip callback: it
-    # captures the timestamp and returns in a few microseconds.
-    ns.connect(ntp_ip=IP_AMP)
-
-    # Drift correction is on by default. This tells the package how often
-    # to refresh its clock model; the experiment still decides when it is
-    # safe, by calling sample_drift_if_due() during the ITI.
-    ns.configure_auto_drift(enabled=True, interval=30.0, min_pause=0.35)
+    # EGI 2: connect. send_event() is non-blocking -- it captures the
+    # timestamp and hands the socket write to a background thread -- which
+    # is what makes it safe to call from a flip callback.
+    # Drift correction is on by default. auto_drift tells the package how
+    # often to refresh its clock model; the experiment still decides when
+    # it is safe, by calling sample_drift_if_due() during the ITI. Without
+    # that call nothing is sampled -- pass auto_drift_background=True if
+    # you would rather the package sample on its own thread.
+    ns.connect(
+        ntp_ip=IP_AMP,
+        auto_drift=True,
+        auto_drift_interval=30.0,
+        auto_drift_min_pause=0.35,
+    )
 
     win = visual.Window(fullscr=True, color='black', units='height')
     word_stim = visual.TextStim(win, text='', height=0.15, bold=True)
@@ -154,8 +159,8 @@ def main():
             is_correct = pressed == correct_key
 
             # EGI 5: mark the button press. Sent from the main loop rather
-            # than a flip callback, which is fine -- in async mode it still
-            # captures the timestamp immediately and returns.
+            # than a flip callback, which is fine -- it still captures the
+            # timestamp immediately and returns.
             if pressed is not None:
                 # The key and the outcome go in the description, so they
                 # are readable in Net Station without decoding data keys.
