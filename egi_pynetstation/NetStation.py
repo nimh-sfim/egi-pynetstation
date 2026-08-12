@@ -503,11 +503,11 @@ class NetStation(object):
 
         See Also
         --------
-        time_at_monotonic: convert a previously captured ``time.monotonic()``
-        reading into an event timestamp. Prefer that in a screen-flip
-        callback: capture the raw monotonic value on the critical path and
-        convert it afterwards, so no lock or model work happens near the
-        flip.
+        time_at_monotonic : Convert a previously captured
+            ``time.monotonic()`` reading into an event timestamp. Prefer
+            that in a screen-flip callback: capture the raw monotonic
+            value on the critical path and convert it afterwards, so no
+            lock or model work happens near the flip.
         """
         return self.time_at_monotonic(time.monotonic())
 

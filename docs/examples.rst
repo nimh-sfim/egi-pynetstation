@@ -34,7 +34,7 @@ Stroop task
 
 It is written as a reference for the smallest clean setup: every line
 that talks to the amplifier is marked with an ``EGI:`` comment, and there
-are only seven of them.
+are only eight of them.
 
 .. code-block:: bash
 
@@ -82,11 +82,29 @@ Marking a ``miss`` matters more than it looks. Without it, a timed-out
 trial has a stimulus onset with no matching response event, which makes
 epoching awkward later.
 
-.. note::
+Warming up the clock
+^^^^^^^^^^^^^^^^^^^^
 
-   A 25-trial run takes roughly two minutes, so drift correction will
-   probably never engage — it needs 13 NTP samples spanning 180 seconds
-   by default. Timestamps are still correct, just uncorrected for drift.
+The 25 trials take only about two minutes, which is less than the
+180 seconds of evidence the drift model needs — so without help the
+correction would never engage at all.
+
+``warm_up_drift_model()`` collects those samples while the instructions
+are on screen, using time the experiment would spend anyway, and prints
+whether correction engaged before trial 1:
+
+.. code-block:: text
+
+    Drift correction engaged before trial 1: -22.3 ms/hour
+
+That does mean the instruction screen sits for about 195 seconds, with a
+countdown so it does not look frozen. Set ``WARMUP_SAMPLES = 0`` at the
+top of the file to skip it; timestamps remain correct, just uncorrected
+for drift.
+
+The warm-up has to come after ``begin_rec()``, because ``sample_drift()``
+needs the NTP sync that ``begin_rec()`` performs. See
+:doc:`psychopy` for why a shorter window does not work.
 
 Photocell timing validation
 ---------------------------
@@ -128,7 +146,41 @@ Useful options beyond the defaults::
     --drift-max-model-age S    stop extrapolating after this age (600)
     --drift-stall-after N      rejected fits before logging a stall (5)
     --sync-events              send with wait=True, for comparison
+    --clock-timing             schedule onsets on the clock, not by frame
     --no-drift-correction      disable correction entirely
+
+Frame-counted onsets
+^^^^^^^^^^^^^^^^^^^^
+
+Onsets are scheduled by counting frames, not by waiting on a clock, and
+the run reports the display it measured:
+
+.. code-block:: text
+
+    Display: 60.0004 Hz, 16.6665 ms/frame (measured)
+      the 3 s ISI is 0.00129 frame off a whole number, so under clock
+      timing the flip phase sweeps a full frame about every 39 min
+    Onset scheduling: frame
+
+This matters more than it sounds. A refresh only 7 ppm away from an exact
+divisor of the inter-stimulus interval makes the flip phase sweep slowly
+through a whole frame, and the display can then present one frame later
+than expected. That shows up in the photocell as a clean one-frame step
+with **no software correlate at all** — identical flip gaps, identical
+event timestamps, identical drift state.
+
+It was observed directly: an hour-long run stepped +17 ms at 16 minutes
+and back at 57 minutes, 40.8 minutes apart, against a predicted beat
+period of 39 minutes.
+
+Counting frames pins the flip to a constant phase and removes the effect.
+``--clock-timing`` restores the old behaviour for comparison; in
+simulation it reproduces the sawtooth exactly (``late_ms`` sd 4.6 ms,
+range one full frame) where frame timing holds it flat.
+
+The measured refresh, frame period, timing mode, and each trial's
+``onset_frame`` are written to the CSV, and a ``display_timing`` record
+goes to the error log.
 
 What to check in the output
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

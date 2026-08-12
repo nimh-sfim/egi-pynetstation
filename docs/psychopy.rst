@@ -42,6 +42,266 @@ That is the whole integration — no ``queue``, no ``threading``, no manual
 timestamp bookkeeping. A complete working version is
 :doc:`example3_stroop.py <examples>`.
 
+All the commands you need to know
+---------------------------------
+
+Seven calls cover a complete experiment. Everything else in this package
+is diagnostics or tuning.
+
+``ns.connect(...)``
+^^^^^^^^^^^^^^^^^^^
+
+Opens the ECI connection and configures the clock machinery. Drift
+correction and the sampling schedule are both on already, so the only
+arguments most experiments pass are the amplifier address and the
+sampling interval.
+
+.. code-block:: python
+
+    ns.connect(ntp_ip='10.10.10.51', auto_drift_interval=15.0)
+
+Add ``auto_drift_background=True`` if you would rather the package take
+the samples itself. See :doc:`drift` for the full set.
+
+``ns.begin_rec()``
+^^^^^^^^^^^^^^^^^^
+
+Starts the recording, and performs the one ECI ``NTPClockSync`` that
+establishes the event timestamp epoch. Every event timestamp is measured
+from this moment, so it must come before any events.
+
+.. code-block:: python
+
+    ns.begin_rec()
+
+Call it exactly once per recording. Re-syncing mid-recording resets the
+epoch and puts a discontinuity in your timestamps.
+
+``win.callOnFlip(ns.send_event, ...)``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PsychoPy's own mechanism: run this function on the next flip. Because
+``send_event()`` is non-blocking, it is safe to hand it directly to
+``callOnFlip`` — the marker is then timestamped at the flip that made the
+stimulus visible.
+
+.. code-block:: python
+
+    stim.draw()
+    win.callOnFlip(ns.send_event, event_type='stm+', label='stimulus')
+    win.flip()
+
+Draw first, register the callback, then flip. Any keyword arguments you
+give ``callOnFlip`` are passed through to ``send_event()``.
+
+``ns.send_event(...)``
+^^^^^^^^^^^^^^^^^^^^^^
+
+Sends one event marker. ``event_type`` is the only required argument and
+must be exactly four ASCII characters.
+
+.. code-block:: python
+
+    ns.send_event(event_type='resp')
+
+    ns.send_event(
+        event_type='resp',
+        label='key r',                       # short name, up to 256 chars
+        desc='key=r incorrect target=p',     # free text, up to 256 chars
+        data={'trl_': 7, 'corr': False},     # keys exactly 4 chars
+    )
+
+It timestamps the moment it is *called*, then returns in microseconds
+while a background thread does the network write. So calling it inside a
+flip callback marks the flip, and calling it from your trial loop marks
+that line of code — both are equally precise. Returns ``None``; pass
+``wait=True`` only if you need the amplifier's reply.
+
+``ns.sample_drift_if_due(available_pause=...)``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Takes an NTP drift sample, but only if one is due and the gap you offer
+is long enough. Call it during a quiet stretch — an inter-trial interval,
+a fixation, a rest screen.
+
+.. code-block:: python
+
+    ns.sample_drift_if_due(available_pause=1.0)
+
+``available_pause`` is how much idle time you can safely give up, in
+seconds. A sample blocks for roughly 170 ms, so this is what keeps NTP
+queries away from your flips.
+
+.. important::
+
+   Unless you set ``auto_drift_background=True``, this call — or
+   ``sample_drift()`` below — is **the only thing that ever takes a
+   sample.** Skip both and the drift model never gets any data, so
+   correction never engages, and nothing will interrupt your experiment
+   to tell you.
+
+``ns.sample_drift()``
+^^^^^^^^^^^^^^^^^^^^^
+
+Takes a sample **right now**, ignoring the schedule and asking no
+questions about whether there is room for it. Blocks for roughly 170 ms
+and returns the sample.
+
+One call produces one sample, not four: the burst makes
+``drift_samples`` NTP queries and keeps only the lowest-delay reply,
+discarding the rest. Raising ``drift_samples`` therefore buys a *better*
+sample rather than more of them.
+
+.. code-block:: python
+
+    sample = ns.sample_drift()
+
+Use it when *you* know the moment is safe and you do not want the
+schedule deciding — during instructions, a rest break, or a between-block
+screen. Never call it inside a flip callback or a tight stimulus loop.
+
+The most useful case is warming the model up before the first trial.
+Drift correction needs 13 samples spanning 180 seconds by default, so an
+experiment that starts cold spends its first few minutes uncorrected. A
+short loop while the participant reads the instructions fixes that:
+
+.. code-block:: python
+
+    ns.begin_rec()          # must come first: this is what syncs the clock
+
+    # Now warm the model up while the instructions are on screen.
+    show_instructions()
+    for _ in range(13):
+        ns.sample_drift()
+        core.wait(15.0)
+    wait_for_keypress()
+
+    # Trials start with correction already engaged.
+
+That is 13 samples spanning 195 seconds, which clears the defaults of 13
+samples over 180 seconds with a little room to spare.
+
+.. warning::
+
+   Do not compress the warm-up into a shorter window by sampling faster.
+   ``drift_min_span`` gates the fit at whatever value it holds, so with
+   the 180 s default, 40 samples crammed into 60 seconds produce **no fit
+   at all** — 160 NTP queries and nothing to show.
+
+Above that gate, span buys more than count. The uncertainty in the fitted
+slope falls as ``1/span`` but only as ``1/sqrt(n)``, so stretching the
+warm-up is worth about twice as much as sampling twice as often within
+it. Simulated with realistic NTP noise:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 42 20 38
+
+   * - Warm-up
+     - Engages?
+     - Slope error
+   * - 13 samples over 60 s
+     - **no**
+     - never fits
+   * - 13 samples over 195 s
+     - yes
+     - 5.2 ms/hour
+   * - 26 samples over 195 s
+     - yes
+     - 3.3 ms/hour
+   * - 13 samples over 390 s
+     - yes
+     - 2.6 ms/hour
+
+``drift_min_span`` is settable — ``set_drift_requirements(min_span=...)``
+— and lowering it will let a short window fit. It does not make the fit
+any better, though: with the same 13 samples over 195 s, a lowered
+threshold gives exactly the same 5.2 ms/hour. Accuracy comes from the
+span you actually sample over; the threshold only decides whether the
+model is allowed to engage.
+
+What the default is protecting you from is a slope estimated over too
+short a lever arm. At a 30-second span the slope error is about
+33 ms/hour — larger than the roughly 17 ms/hour of drift being corrected,
+so the correction would leave timing *worse* than doing nothing. The two
+break even near a 60-second span, and the 180-second default keeps about
+3x margin above that.
+
+None of this is worth optimising hard. A 5 ms/hour slope error is about
+1.3 ms of accumulated timing error over the following quarter hour, and
+it shrinks as real samples arrive during the run. Thirteen samples over
+195 seconds is a sensible floor, not a target.
+
+.. note::
+
+   ``sample_drift()`` is only available after ``begin_rec()``, because
+   the NTP sync it performs is what establishes the clock the samples are
+   measured against. Calling it earlier raises ``RuntimeError``.
+
+Rule of thumb: ``sample_drift_if_due()`` in your trial loop, where the
+schedule should decide; ``sample_drift()`` outside it, where you decide.
+
+``ns.end_rec()``
+^^^^^^^^^^^^^^^^
+
+Stops the recording. Any events still queued are flushed first, so
+markers sent on the last trial still arrive.
+
+.. code-block:: python
+
+    ns.end_rec()
+
+``ns.disconnect()``
+^^^^^^^^^^^^^^^^^^^
+
+Closes the connection and stops the background threads. Also flushes
+queued events, and warns if drift sampling never happened.
+
+.. code-block:: python
+
+    ns.disconnect()
+
+Put both of these in a ``finally`` block so they run even if the
+experiment raises or the participant quits early:
+
+.. code-block:: python
+
+    recording = False
+    try:
+        ns.begin_rec()
+        recording = True
+        ...
+    finally:
+        if recording:
+            ns.end_rec()
+        ns.disconnect()
+
+At a glance
+^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Call
+     - When
+   * - ``ns.connect(...)``
+     - Once, at startup.
+   * - ``ns.begin_rec()``
+     - Once, before any events.
+   * - ``win.callOnFlip(ns.send_event, ...)``
+     - Every stimulus onset you want marked.
+   * - ``ns.send_event(...)``
+     - Responses, trial boundaries, anything not tied to a flip.
+   * - ``ns.sample_drift_if_due(...)``
+     - Every inter-trial interval; the schedule decides.
+   * - ``ns.sample_drift()``
+     - Warm-up, rest breaks — any moment you know is safe.
+   * - ``ns.end_rec()``
+     - Once, at the end.
+   * - ``ns.disconnect()``
+     - Once, after ``end_rec()``.
+
 Why this is safe in a flip callback
 -----------------------------------
 

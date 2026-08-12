@@ -8,15 +8,16 @@ order. Five of those are congruent (word matches ink), twenty incongruent.
 
 This is a reference for the smallest clean egi_pynetstation setup. Every
 line that talks to the amplifier is marked with an "EGI:" comment. There
-are only seven of them:
+are only eight of them:
 
     1. NetStation(...)                 create the connection
     2. ns.connect(...)                 connect; events send off-thread
     3. ns.begin_rec()                  start recording (does the NTP sync)
-    4. win.callOnFlip(ns.send_event)   mark stimulus onset on the flip
-    5. ns.send_event(...)              mark the button press
-    6. ns.sample_drift_if_due(...)     let the clock model stay current
-    7. ns.end_rec() / ns.disconnect()  stop cleanly
+    4. ns.sample_drift()               warm the clock model up
+    5. win.callOnFlip(ns.send_event)   mark stimulus onset on the flip
+    6. ns.send_event(...)              mark the button press
+    7. ns.sample_drift_if_due(...)     let the clock model stay current
+    8. ns.end_rec() / ns.disconnect()  stop cleanly
 
 Markers written to the recording:
 
@@ -50,6 +51,19 @@ COLORS = {
 }
 WORDS = list(COLORS)
 
+INSTRUCTIONS = (
+    'Name the INK COLOUR, not the word.\n\n'
+    'r = red    g = green    b = blue\n'
+    'y = yellow    p = purple\n'
+)
+
+# Warming the drift model up while the participant reads the instructions.
+# The model needs WARMUP_SAMPLES samples spanning at least drift_min_span
+# seconds (180 by default) before correction engages, so 13 x 15 s = 195 s
+# clears it. Set WARMUP_SAMPLES = 0 to skip and start uncorrected.
+WARMUP_SAMPLES = 13
+WARMUP_INTERVAL_S = 15.0
+
 FIXATION_S = 0.500
 RESPONSE_TIMEOUT_S = 2.000
 ITI_S = 1.000
@@ -65,6 +79,39 @@ def build_trials():
     ]
     random.shuffle(trials)
     return trials
+
+
+def warm_up_drift_model(ns, win, message):
+    """Collect drift samples while the instructions are on screen.
+
+    Returns False if the operator quit.
+
+    Shortening this window does not help. drift_min_span gates the fit at
+    whatever value it holds, so with the 180 s default, samples crammed
+    into less time produce no fit at all. Lowering the threshold lets a
+    short window fit but does not improve it -- accuracy comes from the
+    span actually sampled, which is why the gate exists. Span buys more
+    than count: slope uncertainty falls as 1/span but only as 1/sqrt(n).
+    """
+    for index in range(WARMUP_SAMPLES):
+        remaining = (WARMUP_SAMPLES - index) * WARMUP_INTERVAL_S
+        message.text = (
+            INSTRUCTIONS
+            + f'\n\nPreparing the clock: about {remaining:.0f} s left'
+        )
+        message.draw()
+        win.flip()
+
+        # EGI 4: take a sample now. Safe here because we know nothing is
+        # being timed -- never do this near a flip that matters.
+        ns.sample_drift()
+
+        timer = core.Clock()
+        while timer.getTime() < WARMUP_INTERVAL_S:
+            if event.getKeys(keyList=QUIT_KEYS):
+                return False
+            core.wait(0.05)
+    return True
 
 
 def main():
@@ -102,16 +149,25 @@ def main():
         ns.begin_rec()
         recording = True
 
-        message.text = (
-            'Name the INK COLOUR, not the word.\n\n'
-            'r = red    g = green    b = blue\n'
-            'y = yellow    p = purple\n\n'
-            'Press space to begin.'
-        )
+        # Warm the drift model up while the participant reads, so the
+        # first trial is already drift-corrected. This has to come after
+        # begin_rec(), because sample_drift() needs the NTP sync it does.
+        if WARMUP_SAMPLES and not warm_up_drift_model(ns, win, message):
+            return 0
+
+        message.text = INSTRUCTIONS + '\n\nPress space to begin.'
         message.draw()
         win.flip()
         if event.waitKeys(keyList=['space'] + QUIT_KEYS)[0] in QUIT_KEYS:
             return 0
+
+        state = ns.clock_state()
+        if state['drift_accepted_fits']:
+            print('Drift correction engaged before trial 1: '
+                  f"{state['active_drift_slope'] * 3.6e6:.1f} ms/hour")
+        else:
+            print('Drift correction not yet engaged; trials start '
+                  'uncorrected.')
 
         for index, trial in enumerate(trials, start=1):
             # --- fixation ---
@@ -124,7 +180,7 @@ def main():
             word_stim.color = trial['color'].lower()
             word_stim.draw()
 
-            # EGI 4: mark the onset on the flip that actually shows the
+            # EGI 5: mark the onset on the flip that actually shows the
             # word. Event types must be exactly four ASCII characters, and
             # every data key must be exactly four characters too.
             win.callOnFlip(
@@ -158,7 +214,7 @@ def main():
 
             is_correct = pressed == correct_key
 
-            # EGI 5: mark the button press. Sent from the main loop rather
+            # EGI 6: mark the button press. Sent from the main loop rather
             # than a flip callback, which is fine -- it still captures the
             # timestamp immediately and returns.
             if pressed is not None:
@@ -203,7 +259,7 @@ def main():
             # --- inter-trial interval ---
             win.flip()
 
-            # EGI 6: offer the package the idle time it may use. It samples
+            # EGI 7: offer the package the idle time it may use. It samples
             # only if one is due and the pause is long enough, so this never
             # lands near a flip.
             ns.sample_drift_if_due(available_pause=ITI_S)
@@ -224,7 +280,7 @@ def main():
         if errors:
             print(f'WARNING: {len(errors)} events failed to send:', errors[:3])
     finally:
-        # EGI 7: close cleanly. Both of these flush any queued events first,
+        # EGI 8: close cleanly. Both of these flush any queued events first,
         # so markers sent on the last trial still reach Net Station.
         if recording:
             ns.end_rec()
@@ -238,11 +294,23 @@ if __name__ == '__main__':
     raise SystemExit(main())
 
 
-# NOTE ON SHORT RUNS
+# NOTE ON THE WARM-UP
 # Drift correction does not engage until the model has enough evidence:
-# 13 NTP samples spanning at least 180 seconds by default. This 25-trial
-# demo takes roughly two minutes, so the correction will likely never
-# activate here -- timestamps still use the initial NTP sync, which is
-# correct, just uncorrected for drift. For real recordings, either run long
-# enough or collect drift samples during setup and instructions so the
-# model is live before the first trial. See README.md.
+# 13 NTP samples spanning at least 180 seconds by default. The 25 trials
+# here take only about two minutes, so without a warm-up the correction
+# would never activate at all. warm_up_drift_model() collects those
+# samples while the instructions are on screen, which is time a real
+# experiment is spending anyway.
+#
+# That does mean the instruction screen sits for about 195 seconds. Set
+# WARMUP_SAMPLES = 0 to skip it; timestamps are still correct, just
+# uncorrected for drift.
+#
+# Do not try to shorten it by sampling faster. drift_min_span gates the
+# fit at whatever value it holds, so with the 180 s default, samples
+# crammed into less time produce no fit at all. Lowering the threshold is
+# allowed but does not help: accuracy comes from the span actually
+# sampled, not the threshold. At a 30 s span the slope error (~33 ms/hour)
+# exceeds the drift being corrected (~17 ms/hour), so the correction would
+# be worse than none -- which is what the default guards against. See
+# docs/psychopy.rst.

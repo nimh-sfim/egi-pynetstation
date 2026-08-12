@@ -380,10 +380,13 @@ Marking a `miss` matters more than it looks: without it, a timed-out trial
 has a stimulus onset with no matching response event, which makes epoching
 awkward later.
 
-Note that a 25-trial run takes roughly two minutes, so drift correction
-will probably never engage — it needs 13 NTP samples spanning 180 seconds
-by default. Timestamps are still correct, just uncorrected for drift. See
-[Warm-Up Caveat](#warm-up-caveat).
+The 25 trials take about two minutes, which is less than the 180 seconds
+of evidence the drift model needs — so the example warms the model up
+during the instructions with `warm_up_drift_model()`, and prints whether
+correction engaged before trial 1. That makes the instruction screen sit
+for ~195 s, with a countdown; set `WARMUP_SAMPLES = 0` to skip it. The
+warm-up must follow `begin_rec()`, since `sample_drift()` needs the NTP
+sync it performs.
 
 ---
 
@@ -835,24 +838,25 @@ happens only when user code calls `ns.sample_drift()` or
 | `drift_slew` | `0.0002` | Maximum seconds of level correction retired per second elapsed. `0` applies instantly. |
 | `drift_max_model_age` | `600.0` s | Stop extrapolating a fitted slope after this age; the correction then holds. `0` is unbounded. |
 | `auto_drift` | `True` | Enable the drift sampling schedule. Pass `False` to disable. |
-| `auto_drift_interval` | `60.0` s | Target seconds between drift samples. |
-| `auto_drift_min_pause` | `0.5` s | Minimum idle time before a cooperative sample is taken. |
+| `auto_drift_interval` | `15.0` s | Target seconds between drift samples. |
+| `auto_drift_min_pause` | `0.35` s | Minimum idle time before a cooperative sample is taken. Cooperative sampling only. |
 | `auto_drift_background` | `False` | Sample from a package-owned thread rather than requiring `sample_drift_if_due()`. |
 
-Auto-drift scheduling:
+The same four settings are reachable after connecting through
+`configure_auto_drift()`, under shorter names — `enabled`, `interval`,
+`min_pause`, and `background`. Any argument you omit there keeps its
+current value rather than resetting to a default, so it is safe to change
+one setting mid-session:
 
-| Setting | Default | Meaning |
-| --- | ---: | --- |
-| `enabled` | `False` | Whether `sample_drift_if_due()` may sample at all. |
-| `interval` | `60.0` s | Target seconds between drift samples. |
-| `min_pause` | `0.5` s | Minimum idle time an experiment must offer before a sample is taken. Cooperative sampling only. |
-| `background` | `False` | Sample from a package-owned thread instead of requiring `sample_drift_if_due()` calls. |
+```python
+ns.configure_auto_drift(background=True)   # leaves interval and min_pause alone
+```
 
 ## API Summary
 
 ```python
 # Connection
-ns.connect(ntp_ip=..., drift_correction=True, auto_drift=True, ...)
+ns.connect(ntp_ip=..., drift_correction=True, ...)   # both on by default
 ns.begin_rec()
 ns.end_rec()          # flushes queued events
 ns.disconnect()       # flushes queued events, stops the sender
@@ -868,7 +872,7 @@ ns.time_at_monotonic(monotonic_time)  # timestamp for a captured reading
 # Drift sampling
 ns.sample_drift(samples=None, spacing=None)
 ns.sample_drift_if_due(available_pause=None)
-ns.configure_auto_drift(enabled=True, interval=60.0, min_pause=0.5,
+ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35,
                         background=False)
 ns.set_drift_sampling(samples=4, spacing=0.05)
 

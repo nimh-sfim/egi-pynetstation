@@ -60,6 +60,54 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
         )
 
 
+def measure_display(win, isis):
+    """Measure the real refresh rate before any trials run.
+
+    The flip that shows the dot lands at whatever phase the wait loop
+    leaves it in. If the inter-stimulus interval is not an exact multiple
+    of the frame period, that phase sweeps slowly, and the display can
+    present one frame later than expected -- a clean one-frame step with
+    no software correlate. Knowing the real refresh is what lets the trial
+    schedule be expressed in whole frames instead.
+
+    Returns (fps, frame_period_seconds, source).
+    """
+    measured = None
+    try:
+        measured = win.getActualFrameRate(
+            nIdentical=10, nMaxFrames=240, nWarmUpFrames=20, threshold=1,
+        )
+    except Exception as err:
+        print(f'Could not measure refresh rate: {type(err).__name__}: {err}')
+    reported = getattr(win, 'monitorFramePeriod', None)
+
+    if measured:
+        period, source = 1.0 / measured, 'measured'
+    elif reported:
+        measured, period, source = 1.0 / reported, reported, 'reported'
+    else:
+        measured, period, source = 60.0, 1.0 / 60.0, 'assumed'
+
+    print(f'Display: {measured:.4f} Hz, {period * 1000:.4f} ms/frame '
+          f'({source})')
+
+    # Fractional frames each ISI misses a whole frame by. The beat is
+    # driven by the ISI most trials actually use, not the worst one.
+    from collections import Counter
+    common_isi = Counter(isis).most_common(1)[0][0]
+    slip = abs(common_isi / period - round(common_isi / period))
+    worst = max(abs(i / period - round(i / period)) for i in set(isis))
+    if slip > 1e-9:
+        beat_min = (1.0 / slip) * common_isi / 60.0
+        print(f'  the {common_isi:g} s ISI is {slip:.5f} frame off a whole '
+              f'number, so under clock timing the flip phase sweeps a full '
+              f'frame about every {beat_min:.0f} min')
+    else:
+        print(f'  the {common_isi:g} s ISI is a whole number of frames')
+    print(f'  worst ISI rounding error: {worst:.5f} frame')
+    return measured, period, source
+
+
 def build_isi_sequence(duration: float) -> list:
     """Build mixed inter-stimulus intervals for a roughly five-minute run."""
     isis = []
@@ -174,6 +222,10 @@ CSV_COLUMNS = [
     # that validates the package's asynchronous sender.
     'send_call_span_ms',
     'pending_events',
+    'timing_mode',
+    'measured_fps',
+    'frame_period_ms',
+    'onset_frame',
     'send_result',
     'send_error',
     'drift_correction_ms',
@@ -389,6 +441,16 @@ def build_parser() -> ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--clock-timing',
+        action='store_true',
+        help=(
+            'Schedule stimulus onsets against the wall clock instead of '
+            'counting frames. Reproduces the pre-frame-timing behaviour, '
+            'where the flip phase sweeps and the display can present one '
+            'frame late'
+        ),
+    )
+    parser.add_argument(
         '--sync-events',
         action='store_true',
         help=(
@@ -490,9 +552,34 @@ def main(argv=None) -> int:
             lineColor='white',
             edges=64,
         )
-        exp_clock = core.MonotonicClock()
         isis = build_isi_sequence(args.duration)
+        fps, frame_period, fps_source = measure_display(win, isis)
+        timing_mode = 'clock' if args.clock_timing else 'frame'
+        print(f'Onset scheduling: {timing_mode}')
+
+        # Whole-frame schedule. Counting frames pins the flip to a constant
+        # phase, so the display cannot drift into presenting one frame late.
+        isi_frames = [max(1, round(isi / frame_period)) for isi in isis]
+        dot_frames = max(1, round(args.dot_duration / frame_period))
+        if min(isi_frames) <= dot_frames:
+            raise SystemExit(
+                f'--dot-duration ({dot_frames} frames) does not fit inside '
+                f'the shortest ISI ({min(isi_frames)} frames).'
+            )
+        ns._append_error_log({
+            'record': 'display_timing',
+            'measured_fps': fps,
+            'frame_period': frame_period,
+            'fps_source': fps_source,
+            'timing_mode': timing_mode,
+            'dot_frames': dot_frames,
+            'clock': None,
+        })
+
+        exp_clock = core.MonotonicClock()
         next_onset = 0.0
+        onset_frame = 0
+        state = {'frame': 0}
         skipped = {'pause_too_short': 0}
 
         def log_drift_sample(label: str, sample: dict) -> None:
@@ -526,7 +613,11 @@ def main(argv=None) -> int:
         log_drift_sample('drift_sample_start', ns.sample_drift())
 
         for trial, isi in enumerate(isis, 1):
-            next_onset += isi
+            if args.clock_timing:
+                next_onset += isi
+            else:
+                onset_frame += isi_frames[trial - 1]
+                next_onset = onset_frame * frame_period
 
             sync_before_stimulus = (
                 args.ntpsync_every > 0 and
@@ -542,18 +633,31 @@ def main(argv=None) -> int:
                 except Exception as err:
                     sync_error = f'{type(err).__name__}: {err}'
 
-            # Hold the black screen until the scheduled onset, refreshing
-            # every frame so the flip that shows the dot is on schedule.
-            while exp_clock.getTime() < next_onset:
-                if event.getKeys(keyList=QUIT_KEYS):
-                    raise KeyboardInterrupt
-                win.flip()
+            # Hold the black screen until the scheduled onset. Counting
+            # frames leaves the next flip always at the same phase within
+            # the refresh cycle; waiting on the clock does not, which lets
+            # the presented frame slip by one over tens of minutes.
+            if args.clock_timing:
+                while exp_clock.getTime() < next_onset:
+                    if event.getKeys(keyList=QUIT_KEYS):
+                        raise KeyboardInterrupt
+                    win.flip()
+            else:
+                while state['frame'] < onset_frame - 1:
+                    if event.getKeys(keyList=QUIT_KEYS):
+                        raise KeyboardInterrupt
+                    win.flip()
+                    state['frame'] += 1
 
             record = {
                 'trial': trial,
                 'phase': 'dot_on',
                 'send_mode': send_mode,
                 'planned_onset': next_onset,
+                'timing_mode': timing_mode,
+                'measured_fps': fps,
+                'frame_period_ms': frame_period * 1000.0,
+                'onset_frame': '' if args.clock_timing else onset_frame,
                 'sync_before_stimulus': sync_before_stimulus,
                 'sync_after_stimulus': (
                     args.ntpsync_after_every > 0 and
@@ -595,14 +699,23 @@ def main(argv=None) -> int:
             dot.draw()
             win.callOnFlip(mark_onset)
             win.flip()
+            state['frame'] += 1
 
-            dot_off = next_onset + args.dot_duration
-            while exp_clock.getTime() < dot_off:
-                if event.getKeys(keyList=QUIT_KEYS):
-                    raise KeyboardInterrupt
-                dot.draw()
+            if args.clock_timing:
+                dot_off = next_onset + args.dot_duration
+                while exp_clock.getTime() < dot_off:
+                    if event.getKeys(keyList=QUIT_KEYS):
+                        raise KeyboardInterrupt
+                    dot.draw()
+                    win.flip()
                 win.flip()
-            win.flip()
+            else:
+                for _ in range(dot_frames - 1):
+                    dot.draw()
+                    win.flip()
+                    state['frame'] += 1
+                win.flip()
+                state['frame'] += 1
 
             if record['sync_after_stimulus']:
                 record['post_sync_local_time'] = time.time()
