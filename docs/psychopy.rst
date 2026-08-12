@@ -13,7 +13,6 @@ to configure.
     ns = NetStation('10.10.10.42', 55513)
     ns.connect(
         ntp_ip='10.10.10.51',
-        auto_drift=True,
         auto_drift_interval=15.0,
         auto_drift_min_pause=0.35,
     )

@@ -285,7 +285,13 @@ def test_auto_drift_can_be_configured_from_connect(tmp_path, monkeypatch):
         ns._stop_auto_drift_thread()
 
 
-def test_connect_leaves_auto_drift_off_unless_asked(tmp_path, monkeypatch):
+def test_connect_enables_auto_drift_but_not_background(tmp_path, monkeypatch):
+    """Auto-drift is on by default; background sampling is not.
+
+    The schedule is enabled so that sample_drift_if_due() -- the call an
+    experiment is told to make -- actually samples. Nothing starts a thread
+    unless background=True is asked for explicitly.
+    """
     monkeypatch.setattr(
         netstation_module, 'NTPClient',
         lambda: types.SimpleNamespace(request=lambda *a, **k: FakeResponse()),
@@ -296,8 +302,24 @@ def test_connect_leaves_auto_drift_off_unless_asked(tmp_path, monkeypatch):
                             read=lambda: b'Z', disconnect=lambda: None))
     ns = NetStation('127.0.0.1', 55513)
     ns.connect(ntp_ip='10.10.10.51')
-    assert ns._auto_drift_enabled is False
+    assert ns._auto_drift_enabled is True
+    assert ns._auto_drift_background is False
     assert ns._auto_drift_thread is None
+
+
+def test_connect_can_disable_auto_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        netstation_module, 'NTPClient',
+        lambda: types.SimpleNamespace(request=lambda *a, **k: FakeResponse()),
+    )
+    monkeypatch.setattr(netstation_module, 'Socket', lambda *a, **k:
+                        types.SimpleNamespace(
+                            connect=lambda: None, write=lambda b: None,
+                            read=lambda: b'Z', disconnect=lambda: None))
+    ns = NetStation('127.0.0.1', 55513)
+    ns.connect(ntp_ip='10.10.10.51', auto_drift=False)
+    assert ns._auto_drift_enabled is False
+    assert ns.sample_drift_if_due()['reason'] == 'disabled'
 
 
 def test_removed_legacy_alias_is_gone():

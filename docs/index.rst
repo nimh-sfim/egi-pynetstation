@@ -36,7 +36,6 @@ The short version
     ns = NetStation('10.10.10.42', 55513)
     ns.connect(
         ntp_ip='10.10.10.51',
-        auto_drift=True,             # recommended
         auto_drift_interval=15.0,
     )
     ns.begin_rec()
@@ -53,11 +52,11 @@ The short version
 
 Three things are worth knowing before you write anything else:
 
-1. **Drift correction is on by default, but sampling is not.** Enable it
-   with ``auto_drift=True`` and then either call
+1. **Drift correction and the sampling schedule are both on by default,
+   but something still has to take the samples.** Either call
    :meth:`~egi_pynetstation.NetStation.NetStation.sample_drift_if_due`
    during quiet periods, or pass ``auto_drift_background=True`` and let
-   the package handle it. See :doc:`drift`.
+   the package handle it on its own thread. See :doc:`drift`.
 2. **Send events from the flip callback.**
    :meth:`~egi_pynetstation.NetStation.NetStation.send_event` never
    blocks, so it is safe there. See :doc:`psychopy`.

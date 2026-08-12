@@ -103,7 +103,7 @@ from psychopy import visual, core
 from egi_pynetstation import NetStation
 
 ns = NetStation('10.10.10.42', 55513)
-ns.connect(ntp_ip='10.10.10.51', auto_drift=True, auto_drift_interval=15.0)
+ns.connect(ntp_ip='10.10.10.51', auto_drift_interval=15.0)
 
 win = visual.Window(fullscr=True, screen=1, color='black')
 stim = visual.TextStim(win, text='+')
@@ -192,20 +192,41 @@ following frame.
 
 ## Drift Sampling
 
+`drift_correction` and `auto_drift` sound alike but do different jobs. They
+are the two halves of one pipeline — **collect, then apply** — and
+correction only happens when both are in play:
+
+- **`auto_drift` is the producer.** It governs whether NTP drift samples are
+  collected, and on what schedule. No samples, no model.
+- **`drift_correction` is the consumer.** It governs only whether
+  `getTime()` applies the fitted model to the timestamp it returns. Off, and
+  `getTime()` returns raw elapsed time.
+
+| `auto_drift` | `drift_correction` | Result |
+|---|---|---|
+| on | on | **The default, and the working configuration.** |
+| on | off | Samples collected and logged, but `getTime()` ignores them. Useful for measuring drift without correcting for it. |
+| off | on | No samples collected, so correction never engages. An explicit `sample_drift()` still works. |
+| off | off | No drift machinery at all. |
+
+Both default to `True`. What remains yours to arrange is *who takes the
+samples*.
+
 Drift samples are NTP queries. They do **not** send ECI clock-sync commands
 and do not create markers. They do block the calling thread for roughly
 170 ms at default settings, so they must not land near a flip.
 
-**`configure_auto_drift()` only records a schedule — nothing polls it.**
-`sample_drift_if_due()` is the only thing that acts on it, so an experiment
-that enables auto-drift and never calls it collects no samples at all, and
-drift correction never engages. There are two ways to arrange the sampling.
+**Auto-drift is a schedule, not a worker — nothing polls it.** The schedule
+is enabled by default, but `sample_drift_if_due()` is the only thing that
+acts on it, so an experiment that never calls it collects no samples at all
+and drift correction never engages. There are two ways to arrange the
+sampling.
 
 **Cooperative (default).** The package owns the schedule, your experiment
 owns the timing-safety window:
 
 ```python
-ns.connect(ntp_ip=..., auto_drift=True, auto_drift_interval=15.0,
+ns.connect(ntp_ip=..., auto_drift_interval=15.0,
            auto_drift_min_pause=0.35)
 ns.sample_drift_if_due(available_pause=iti_remaining)   # in your ITI
 ```
@@ -213,7 +234,7 @@ ns.sample_drift_if_due(available_pause=iti_remaining)   # in your ITI
 **Background.** The package samples on its own, no cooperation needed:
 
 ```python
-ns.connect(ntp_ip=..., auto_drift=True, auto_drift_background=True)
+ns.connect(ntp_ip=..., auto_drift_background=True)
 ```
 
 Either can also be set after connecting, or changed mid-session, with
@@ -441,8 +462,17 @@ finally:
 
 ## Disabling Drift Correction
 
+This stops `getTime()` from applying the model. Sampling continues, so the
+drift is still measured and logged — you just aren't correcting for it.
+
 ```python
 ns.connect(ntp_ip='10.10.10.51', drift_correction=False)
+```
+
+To stop the sampling as well, disable the producer too:
+
+```python
+ns.connect(ntp_ip='10.10.10.51', drift_correction=False, auto_drift=False)
 ```
 
 Or toggle it after connecting:
@@ -793,7 +823,7 @@ happens only when user code calls `ns.sample_drift()` or
 
 | Package setting | Default | Meaning |
 | --- | ---: | --- |
-| `drift_correction` | `True` | Enables drift-corrected `getTime()`. When disabled, timestamps use the initial sync baseline. |
+| `drift_correction` | `True` | Applies the fitted model in `getTime()`. When disabled, timestamps use the initial sync baseline; sampling continues. |
 | `drift_min_samples` | `13` | Minimum valid NTP samples required before correction is applied. |
 | `drift_min_span` | `180.0` s | Minimum elapsed time covered by valid samples before correction is applied. |
 | `drift_max_delay` | `0.010` s | Rejects NTP samples with higher round-trip delay. Rejected samples stay in `drift_history()` but do not affect the model. |
@@ -803,7 +833,7 @@ happens only when user code calls `ns.sample_drift()` or
 | `drift_sample_spacing` | `0.05` s | Seconds between queries within one burst. |
 | `drift_slew` | `0.0002` | Maximum seconds of level correction retired per second elapsed. `0` applies instantly. |
 | `drift_max_model_age` | `600.0` s | Stop extrapolating a fitted slope after this age; the correction then holds. `0` is unbounded. |
-| `auto_drift` | off | Enable automatic drift sampling from `connect()`. |
+| `auto_drift` | `True` | Enable the drift sampling schedule. Pass `False` to disable. |
 | `auto_drift_interval` | `60.0` s | Target seconds between drift samples. |
 | `auto_drift_min_pause` | `0.5` s | Minimum idle time before a cooperative sample is taken. |
 | `auto_drift_background` | `False` | Sample from a package-owned thread rather than requiring `sample_drift_if_due()`. |

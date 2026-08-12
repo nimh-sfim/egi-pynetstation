@@ -74,14 +74,14 @@ def main():
     # EGI 2: connect. send_event() is non-blocking -- it captures the
     # timestamp and hands the socket write to a background thread -- which
     # is what makes it safe to call from a flip callback.
-    # Drift correction is on by default. auto_drift tells the package how
-    # often to refresh its clock model; the experiment still decides when
-    # it is safe, by calling sample_drift_if_due() during the ITI. Without
-    # that call nothing is sampled -- pass auto_drift_background=True if
-    # you would rather the package sample on its own thread.
+    # Drift correction and drift sampling are both on by default;
+    # auto_drift_interval only tunes how often the clock model is
+    # refreshed. The experiment still decides when it is safe, by calling
+    # sample_drift_if_due() during the ITI. Without that call nothing is
+    # sampled -- pass auto_drift_background=True if you would rather the
+    # package sample on its own thread.
     ns.connect(
         ntp_ip=IP_AMP,
-        auto_drift=True,
         auto_drift_interval=30.0,
         auto_drift_min_pause=0.35,
     )

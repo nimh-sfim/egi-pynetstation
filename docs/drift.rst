@@ -11,21 +11,62 @@ Drift correction measures that rate and compensates for it inside
 timestamps stay aligned to the amplifier without ever re-syncing the ECI
 clock.
 
+Two settings, two stages
+------------------------
+
+``drift_correction`` and ``auto_drift`` sound alike but do different jobs,
+and correction only happens when both are in play. They are the two halves
+of one pipeline: **collect, then apply.**
+
+``auto_drift`` is the **producer**. It governs whether NTP drift samples
+are collected, and on what schedule. Without samples there is no model.
+
+``drift_correction`` is the **consumer**. It governs only whether
+:meth:`~egi_pynetstation.NetStation.NetStation.getTime` applies the fitted
+model to the timestamp it returns. With it off, ``getTime()`` returns raw
+elapsed time.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 18 66
+
+   * - ``auto_drift``
+     - ``drift_correction``
+     - Result
+   * - on
+     - on
+     - **The default, and the working configuration.**
+   * - on
+     - off
+     - Samples collected and logged, but ``getTime()`` ignores them.
+       Useful for measuring drift without correcting for it.
+   * - off
+     - on
+     - No samples are ever collected, so correction never engages. An
+       explicit ``sample_drift()`` call still works.
+   * - off
+     - off
+     - No drift machinery at all.
+
+Both default to ``True``, so the working configuration is what you get
+without asking. What remains yours to arrange is *who takes the samples* —
+see the next two sections.
+
 .. _recommended-setup:
 
 Recommended setup
 -----------------
 
-**Turn drift correction on, turn auto-drift on, and sample during
-inter-trial intervals.** That is the configuration validated over
-repeated one-hour photocell runs.
+**Keep the defaults and sample during inter-trial intervals.** Drift
+correction and the sampling schedule are both on already, so all that is
+left is tuning the interval and calling
+:meth:`~egi_pynetstation.NetStation.NetStation.sample_drift_if_due`. That
+is the configuration validated over repeated one-hour photocell runs.
 
 .. code-block:: python
 
     ns.connect(
         ntp_ip='10.10.10.51',
-        drift_correction=True,        # the default
-        auto_drift=True,              # recommended: enable the schedule
         auto_drift_interval=15.0,     # a sample every 15 s
         auto_drift_min_pause=0.35,    # only in gaps at least this long
     )
@@ -44,10 +85,10 @@ safe gap exists.
 .. warning::
 
    ``auto_drift`` sets a **schedule**, not a worker.
-   ``sample_drift_if_due()`` is the only thing that acts on it. An
-   experiment that enables auto-drift and never calls it collects no
-   samples at all, drift correction never engages, and nothing else
-   complains.
+   ``sample_drift_if_due()`` is the only thing that acts on it. Because
+   the schedule is on by default, it is easy to assume sampling is
+   handled: an experiment that never calls it collects no samples at all,
+   drift correction never engages, and nothing else complains.
 
    ``disconnect()`` will warn if it detects this, and writes a
    ``drift_undersampled`` record to the error log — but that is a safety
@@ -64,7 +105,6 @@ thread:
 
     ns.connect(
         ntp_ip='10.10.10.51',
-        auto_drift=True,
         auto_drift_interval=15.0,
         auto_drift_background=True,
     )
@@ -86,8 +126,8 @@ design.
      - Cooperative *(recommended)*
      - Background
    * - Setup
-     - ``auto_drift=True``
-     - ``auto_drift=True, auto_drift_background=True``
+     - nothing; it is the default
+     - ``auto_drift_background=True``
    * - Your experiment must
      - call ``sample_drift_if_due()`` in quiet periods
      - nothing
@@ -256,7 +296,8 @@ Settings reference
      - Meaning
    * - ``drift_correction``
      - ``True``
-     - Enables drift-corrected ``getTime()``.
+     - Applies the fitted model in ``getTime()``. Disabling it stops
+       correction but not sampling.
    * - ``drift_min_samples``
      - ``13``
      - Valid NTP samples required before correction applies.
@@ -285,8 +326,8 @@ Settings reference
      - ``600.0`` s
      - Stop extrapolating a fit past this age. ``0`` is unbounded.
    * - ``auto_drift``
-     - off
-     - Enable automatic drift sampling from ``connect()``.
+     - ``True``
+     - Enable the drift sampling schedule. Pass ``False`` to disable.
    * - ``auto_drift_interval``
      - ``60.0`` s
      - Target seconds between drift samples.

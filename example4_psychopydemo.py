@@ -21,8 +21,8 @@ Two behaviours do the work:
                       safe to take one by calling sample_drift_if_due()
                       during an inter-trial interval.
 
-Drift correction is enabled by default and does not send repeated ECI
-clock-sync commands.
+Drift correction and drift sampling are both enabled by default, and
+neither sends repeated ECI clock-sync commands.
 """
 
 from psychopy import core, visual
@@ -39,11 +39,11 @@ IP_amp = '10.10.10.51'  # amplifier / Net Station NTP server
 ns = NetStation(IP_ns, port_ns)
 ns.connect(
     ntp_ip=IP_amp,
-    drift_correction=True,   # default
-    # The package owns the sampling schedule; the experiment owns the
-    # timing safety window and calls sample_drift_if_due() below. Nothing
-    # is sampled without that call unless auto_drift_background=True.
-    auto_drift=True,
+    # Drift correction and the sampling schedule are both on by default,
+    # so only the tuning is passed here. The package owns the schedule;
+    # the experiment owns the timing safety window and calls
+    # sample_drift_if_due() below. Nothing is sampled without that call
+    # unless auto_drift_background=True.
     auto_drift_interval=15.0,
     auto_drift_min_pause=0.35,
 )

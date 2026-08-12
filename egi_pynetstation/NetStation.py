@@ -149,7 +149,11 @@ class NetStation(object):
         self._drift_stall_after = 5
         self._drift_stalled = False
         self._drift_stall_started_elapsed = None
-        self._auto_drift_enabled = False
+        # On by default so that sample_drift_if_due() -- the call an
+        # experiment is told to make -- actually takes samples. Sampling on a
+        # schedule is inert until something asks for a sample, so the default
+        # costs nothing for experiments that never call it.
+        self._auto_drift_enabled = True
         self._auto_drift_interval = 60.0
         self._auto_drift_min_pause = 0.5
         self._auto_drift_last_monotonic = None
@@ -275,9 +279,14 @@ class NetStation(object):
             Maximum seconds a fitted slope may be extrapolated past its
             anchor. Use 0 for unbounded extrapolation.
         auto_drift : bool, optional
-            Enable automatic NTP drift sampling. Equivalent to calling
+            Enable automatic NTP drift sampling. On by default; pass False
+            to disable it. Equivalent to calling
             :meth:`configure_auto_drift` after connecting. Passing any
             other ``auto_drift_*`` argument implies this is True.
+
+            Note that this enables the *schedule*, not the sampling. With
+            the default ``auto_drift_background=False``, samples are taken
+            only when the experiment calls :meth:`sample_drift_if_due`.
         auto_drift_interval : float, optional
             Target seconds between drift samples.
         auto_drift_min_pause : float, optional
@@ -1121,7 +1130,9 @@ class NetStation(object):
         Parameters
         ----------
         enabled:
-            Whether drift samples may be taken at all.
+            Whether drift samples may be taken at all. True by default.
+            When False, ``sample_drift_if_due()`` is a no-op and no model
+            is ever fitted; an explicit ``sample_drift()`` still works.
         interval:
             Target seconds between drift samples.
         min_pause:

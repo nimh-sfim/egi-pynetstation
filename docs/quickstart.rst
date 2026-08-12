@@ -15,7 +15,7 @@ events, stop.
     IP_amp = '10.10.10.51'
 
     ns = NetStation(IP_ns, port_ns)
-    ns.connect(ntp_ip=IP_amp, auto_drift=True)
+    ns.connect(ntp_ip=IP_amp)
 
     ns.begin_rec()
 
