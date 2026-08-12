@@ -94,16 +94,16 @@ Event types must be exactly four ASCII characters. The default
 
 # Integrating With Your Own PsychoPy Experiment
 
-Connect with `async_events=True`, then send markers straight from
-`win.callOnFlip()`. The package handles the threading, the timestamp
-capture, and the flushing.
+Send markers straight from `win.callOnFlip()`. The package handles the
+threading, the timestamp capture, and the flushing — asynchronous sending
+is on by default, so there is nothing to configure.
 
 ```python
 from psychopy import visual, core
 from egi_pynetstation import NetStation
 
 ns = NetStation('10.10.10.42', 55513)
-ns.connect(ntp_ip='10.10.10.51', async_events=True)
+ns.connect(ntp_ip='10.10.10.51')
 ns.configure_auto_drift(enabled=True, interval=15.0)
 
 win = visual.Window(fullscr=True, screen=1, color='black')
@@ -130,7 +130,7 @@ finally:
 That is the whole integration. No `queue`, no `threading`, no manual
 timestamp bookkeeping.
 
-## What `async_events=True` Does
+## How Event Sending Works
 
 `send_event()` captures `time.monotonic()` on the calling thread — the one
 aligned with your stimulus — puts the event on a queue, and returns. A
@@ -147,8 +147,8 @@ timing.
 
 Two consequences worth knowing:
 
-- `send_event()` returns `None` in async mode, because there is no response
-  yet. Use `wait=True` on any individual call if you need the ECI response.
+- `send_event()` returns `None`, because there is no response yet. Use
+  `wait=True` on any individual call if you need the ECI response.
 - Send failures cannot raise into your experiment code, so they are
   collected instead. Check them at the end of a run:
 
@@ -158,17 +158,33 @@ if errors:
     print(f'{len(errors)} events failed to send:', errors[:3])
 ```
 
-Queued events are flushed automatically by `end_rec()` and `disconnect()`.
-Call `ns.flush_events()` yourself only if you need a synchronisation point
+Queued events are flushed automatically by `end_rec()` and `disconnect()`,
+and again at interpreter exit as a safety net, so a script that crashes or
+forgets to disconnect still delivers what it queued. Call
+`ns.flush_events()` yourself only if you need a synchronisation point
 mid-experiment.
 
-## Without `async_events`
+## Blocking When You Want To
 
-The default is synchronous, which preserves the original behaviour:
-`send_event()` writes to the socket and returns the parsed ECI response.
-That is fine for non-visual experiments and for diagnostics, but it will
-block a flip callback for the duration of a network round trip. Use
-`async_events=True` for anything where stimulus timing matters.
+`async_events` sets the *default* for a connection; `wait` overrides it for
+a single call. Both compose in both directions:
+
+| | `send_event()` | `send_event(wait=True)` | `send_event(wait=False)` |
+| --- | --- | --- | --- |
+| `async_events=True` (default) | non-blocking, returns `None` | blocks, returns ECI response | non-blocking |
+| `async_events=False` | blocks, returns ECI response | blocks | non-blocking |
+
+So a synchronous connection can still fire one event without waiting, and
+an asynchronous connection can still ask for one response. The background
+sender starts on first use, so `wait=False` works even if you never asked
+for asynchronous sending at connect time.
+
+Use `async_events=False` for a diagnostic console, or any code that
+inspects what the amplifier replied — `example2.py` does exactly this. Do
+**not** use it in a visual experiment: a synchronous send blocks the flip
+callback for a full network round trip. Measured on the reference setup,
+that is about 56 us asynchronous versus 7.6 ms synchronous, and the
+blocking version pushes the following frame.
 
 ## Drift Sampling
 
@@ -682,7 +698,7 @@ happens only when user code calls `ns.sample_drift()` or
 | `drift_sample_spacing` | `0.05` s | Seconds between queries within one burst. |
 | `drift_slew` | `0.0002` | Maximum seconds of level correction retired per second elapsed. `0` applies instantly. |
 | `drift_max_model_age` | `600.0` s | Stop extrapolating a fitted slope after this age; the correction then holds. `0` is unbounded. |
-| `async_events` | `False` | Send events from a background thread so `send_event()` is safe inside a flip callback. Recommended for visual experiments. |
+| `async_events` | `True` | Send events from a background thread so `send_event()` is safe inside a flip callback. Set `False` only for diagnostics that need the ECI response. |
 
 Auto-drift scheduling:
 
@@ -696,14 +712,15 @@ Auto-drift scheduling:
 
 ```python
 # Connection
-ns.connect(ntp_ip=..., async_events=True, drift_correction=True, ...)
+ns.connect(ntp_ip=..., drift_correction=True, ...)   # async_events=True
 ns.begin_rec()
 ns.end_rec()          # flushes queued events
 ns.disconnect()       # flushes queued events, stops the sender
 
 # Events
 ns.send_event(start='now', event_type='stm+', label='stm+')
-ns.send_event(..., wait=True)         # force a synchronous send
+ns.send_event(..., wait=True)         # force one blocking send
+ns.send_event(..., wait=False)        # force one non-blocking send
 ns.flush_events(timeout=None)         # block until the queue drains
 ns.event_errors()                     # failures from asynchronous sends
 ns.getTime()                          # timestamp for right now

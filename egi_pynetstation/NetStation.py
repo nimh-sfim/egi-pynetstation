@@ -3,6 +3,7 @@
 
 """Abstraction of the NetStation SDK as an object"""
 
+import atexit
 import binascii
 import json
 import logging
@@ -142,10 +143,10 @@ class NetStation(object):
         self._auto_drift_last_monotonic = None
         self._response_tokens = []
         self._recording_start = None
-        # Background event sender. When enabled, send_event() captures the
-        # timestamp on the calling thread and hands the socket write to a
-        # worker, so a screen-flip callback is never blocked by network I/O.
-        self._async_events = False
+        # Background event sender. send_event() captures the timestamp on
+        # the calling thread and hands the socket write to this worker, so
+        # a screen-flip callback is never blocked by network I/O.
+        self._sender_lock = threading.Lock()
         self._event_queue = None
         self._event_thread = None
         self._event_stop = object()
@@ -205,7 +206,6 @@ class NetStation(object):
         drift_sample_spacing: float = None,
         drift_slew: float = None,
         drift_max_model_age: float = None,
-        async_events: bool = False,
     ) -> None:
         """Connect to the Netstation machine via TCP/IP
 
@@ -232,12 +232,6 @@ class NetStation(object):
             of elapsed time, at which level errors are retired
         drift_max_model_age: optional maximum seconds a fitted slope may be
             extrapolated past its anchor; 0 for unbounded
-        async_events: send events from a background thread. Recommended for
-            visual experiments: send_event() then captures the timestamp and
-            returns immediately, so it is safe to call from a screen-flip
-            callback such as PsychoPy's win.callOnFlip(). Queued events are
-            flushed automatically by end_rec() and disconnect(); any send
-            failures are collected in event_errors()
 
         Raises
         ------
@@ -295,9 +289,10 @@ class NetStation(object):
                 slew=drift_slew,
                 max_model_age=drift_max_model_age,
             )
-        self._async_events = async_events
-        if async_events:
-            self._start_event_sender()
+        # Start the sender up front so the first send_event() -- which may
+        # well be inside a flip callback -- does not pay the thread-start
+        # cost. _ensure_event_sender() remains as a safety net.
+        self._start_event_sender()
         if handshake:
             self._command('Query', self._endian)
             self._command('Attention')
@@ -474,6 +469,12 @@ class NetStation(object):
         """
         self.flush_events()
         self._stop_event_sender()
+        if self._event_errors:
+            logger.warning(
+                '%d asynchronous ECI event send(s) failed during this '
+                'session; see event_errors() for details.',
+                len(self._event_errors),
+            )
         with self._io_lock:
             self._command('Exit')
             self._socket.disconnect()
@@ -512,7 +513,7 @@ class NetStation(object):
         label: str = ' ' * 4,
         desc: str = ' ' * 4,
         data: dict = {},
-        wait: bool = None,
+        wait: bool = False,
     ) -> None:
         """Send event to amplifier
 
@@ -532,6 +533,15 @@ class NetStation(object):
             The description to use; must be <= 256 characters. Default "    "
         data: dict
             The event data to send; see Notes for more information.
+        wait: bool
+            Whether to block until the amplifier answers. False by default,
+            which is what makes send_event() safe to call from a screen-flip
+            callback: it captures the timestamp on the calling thread and
+            returns in microseconds while a worker does the socket write.
+            A non-blocking send returns None, since there is no response
+            yet; failures are recorded in ``event_errors()``. Pass True when
+            you actually need the parsed ECI response back, at the cost of a
+            full network round trip on the calling thread.
 
         Notes
         -----
@@ -565,9 +575,6 @@ class NetStation(object):
         --------
         eci.eci for explanations of the internals of the packaging
         """
-        if wait is None:
-            wait = not self._async_events
-
         if not (start == 'now' or isinstance(start, (int, float))):
             t_start = type(start)
             return TypeError(
@@ -576,10 +583,11 @@ class NetStation(object):
 
         if not wait:
             # Capture the clock reading on THIS thread -- the one that is
-            # aligned with the stimulus -- then hand everything else to the
-            # worker. This call is the one that may run in a flip callback,
-            # so it must not touch a lock or the socket.
+            # aligned with the stimulus -- before anything else. This call
+            # is the one that may run in a flip callback, so it must not
+            # touch a lock or the socket.
             monotonic_at_call = time.monotonic()
+            self._ensure_event_sender()
             self._event_queue.put((
                 monotonic_at_call,
                 {
@@ -622,9 +630,26 @@ class NetStation(object):
         with self._io_lock:
             return self._command('EventData', packaged)
 
+    def _ensure_event_sender(self) -> None:
+        """Start the background sender if it is not already running.
+
+        Double-checked so the common path -- a sender already started by
+        connect() -- takes no lock. This lets wait=False work even when the
+        connection default is synchronous.
+        """
+        if self._event_thread is not None:
+            return
+        with self._sender_lock:
+            self._start_event_sender()
+
     def _start_event_sender(self) -> None:
         if self._event_thread is not None:
             return
+        # Asynchronous sending is the default, so an experiment that exits
+        # without calling disconnect() must not silently lose whatever is
+        # still queued. Daemon threads are still alive during atexit, so a
+        # last-chance flush here is effective.
+        atexit.register(self._flush_at_exit)
         self._event_queue = queue.Queue()
         self._event_thread = threading.Thread(
             target=self._event_sender_loop,
@@ -663,6 +688,43 @@ class NetStation(object):
             finally:
                 self._event_queue.task_done()
 
+    def _drain_queue(self, timeout: float = None) -> bool:
+        """Wait until every queued event has actually been sent.
+
+        Waits on the queue's task-completion condition rather than polling
+        empty(). empty() goes True as soon as the last item is dequeued,
+        which is before the worker has finished writing it to the socket.
+        """
+        pending = self._event_queue
+        if pending is None:
+            return True
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with pending.all_tasks_done:
+            while pending.unfinished_tasks:
+                if deadline is None:
+                    pending.all_tasks_done.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                pending.all_tasks_done.wait(remaining)
+        return True
+
+    def _flush_at_exit(self) -> None:
+        """Last-chance drain of the event queue at interpreter shutdown."""
+        if self._event_queue is None or not self._event_queue.unfinished_tasks:
+            return
+        logger.warning(
+            'Exiting with %d ECI event(s) still queued. Call disconnect() '
+            'or flush_events() to send them deterministically.',
+            self._event_queue.unfinished_tasks,
+        )
+        if not self._drain_queue(timeout=5.0):
+            logger.error(
+                'Gave up flushing %d ECI event(s) at exit; they were not '
+                'sent.', self._event_queue.unfinished_tasks
+            )
+
     @check_connected
     def flush_events(self, timeout: float = None) -> bool:
         """Block until every queued asynchronous event has been sent.
@@ -670,17 +732,7 @@ class NetStation(object):
         Called automatically by ``end_rec()`` and ``disconnect()``, so most
         experiments never need it. Returns True if the queue drained.
         """
-        if self._event_queue is None:
-            return True
-        if timeout is None:
-            self._event_queue.join()
-            return True
-        deadline = time.monotonic() + timeout
-        while not self._event_queue.empty():
-            if time.monotonic() > deadline:
-                return False
-            time.sleep(0.005)
-        return True
+        return self._drain_queue(timeout=timeout)
 
     def pending_events(self) -> int:
         """Return how many asynchronous events are still waiting to be sent.
@@ -705,6 +757,7 @@ class NetStation(object):
     def _stop_event_sender(self) -> None:
         if self._event_thread is None:
             return
+        atexit.unregister(self._flush_at_exit)
         self._event_queue.put(self._event_stop)
         self._event_thread.join(timeout=5.0)
         self._event_thread = None

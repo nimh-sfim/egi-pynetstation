@@ -36,6 +36,10 @@ def connect_with_drift_options(
         ns.connect(
             ntp_ip=ntp_ip,
             handshake=handshake,
+            # This is a diagnostic console: it prints the parsed ECI
+            # response for every command, so events must be sent
+            # synchronously. Experiments should keep the async default.
+            async_events=False,
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
@@ -53,6 +57,7 @@ def connect_with_drift_options(
                 'drift_max_delay',
                 'drift_max_residual',
                 'drift_window_minutes',
+                'async_events',
             )
         ):
             raise

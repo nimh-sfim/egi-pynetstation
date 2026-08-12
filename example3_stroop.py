@@ -11,7 +11,7 @@ line that talks to the amplifier is marked with an "EGI:" comment. There
 are only seven of them:
 
     1. NetStation(...)                 create the connection
-    2. ns.connect(async_events=True)   connect; send events off-thread
+    2. ns.connect(...)                 connect; events send off-thread
     3. ns.begin_rec()                  start recording (does the NTP sync)
     4. win.callOnFlip(ns.send_event)   mark stimulus onset on the flip
     5. ns.send_event(...)              mark the button press
@@ -71,10 +71,10 @@ def main():
     # EGI 1: create the connection object.
     ns = NetStation(IP_NETSTATION, ECI_PORT)
 
-    # EGI 2: connect. async_events=True lets send_event() be called from a
-    # flip callback -- it captures the timestamp and returns in a few
-    # microseconds, and the package sends on its own thread.
-    ns.connect(ntp_ip=IP_AMP, async_events=True)
+    # EGI 2: connect. Events are sent from a background thread by default,
+    # which is what lets send_event() be called from a flip callback: it
+    # captures the timestamp and returns in a few microseconds.
+    ns.connect(ntp_ip=IP_AMP)
 
     # Drift correction is on by default. This tells the package how often
     # to refresh its clock model; the experiment still decides when it is

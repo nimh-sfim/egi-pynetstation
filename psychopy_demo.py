@@ -7,12 +7,13 @@ Demonstrate sending EGI Net Station events from PsychoPy.
 This example uses egi-pynetstation, which sends ECI commands and event
 markers to Net Station / Amp Server Pro with NTP-based event timing.
 
-Two settings do the work:
+Two behaviours do the work:
 
-  async_events=True   send_event() captures the timestamp and returns
-                      immediately, so it is safe to call from
-                      win.callOnFlip(). The package sends on its own
-                      background thread.
+  asynchronous sending (on by default) means send_event() captures the
+                      timestamp and returns immediately, so it is safe to
+                      call from win.callOnFlip(). The package sends on its
+                      own background thread. Pass async_events=False only
+                      if you need the ECI response back.
 
   configure_auto_drift()  the package tracks when the next NTP drift
                       sample is due; your experiment decides when it is
@@ -37,8 +38,7 @@ IP_amp = '10.10.10.51'  # amplifier / Net Station NTP server
 ns = NetStation(IP_ns, port_ns)
 ns.connect(
     ntp_ip=IP_amp,
-    async_events=True,      # send events off the critical path
-    drift_correction=True,  # default
+    drift_correction=True,  # default; async event sending is also default
 )
 
 # The package owns the sampling schedule; the experiment owns the timing
