@@ -2,8 +2,9 @@
 
 ## About
 
-`egi-pynetstation` is a Python interface for sending ECI commands and event
-markers to EGI Net Station / Amp Server Pro.
+`egi-pynetstation` is a Python interface for sending ECI 
+(Experimental Control Interface) commands and event markers 
+to EGI Net Station / Amp Server Pro.
 
 The package supports NTP-based event timing. A single ECI `NTPClockSync`
 establishes the event timestamp epoch, and client-side drift correction then
@@ -903,3 +904,7 @@ rather than a condition — but it is a sincere one. If `egi-pynetstation`
 supports your research, please cite it and acknowledge the authors and the NIH
 Center for Multimodal Neuroimaging ([CMN](https://cmn.nimh.nih.gov)) in any
 derived software or publications.
+
+Citation metadata is available in [CITATION.cff](CITATION.cff). A JOSS article
+is in preparation; the package should be cited by its versioned archival DOI
+once that release is created.
