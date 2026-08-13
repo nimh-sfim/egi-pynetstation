@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use egi-pynetstation, please cite it using the metadata below."
+title: "egi-pynetstation"
+abstract: "Python interface for EGI Net Station with drift-corrected, non-blocking EEG event marking."
+type: software
+authors:
+  - family-names: Teves
+    given-names: Joshua B.
+    affiliation: Sandia National Laboratories, New Mexico
+  - family-names: Molfese
+    given-names: Peter J.
+    orcid: https://orcid.org/0000-0002-3045-9408
+    affiliation: National Institute of Mental Health, National Institutes of Health
+version: 2.0.0
+license: MIT
+repository-code: https://github.com/nimh-sfim/egi-pynetstation
+url: https://egi-pynetstation.readthedocs.io/en/latest/
+keywords:
+  - EEG
+  - EGI Net Station
+  - Network Time Protocol (NTP)
+  - PsychoPy
+  - event-related potentials
