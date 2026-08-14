@@ -26,10 +26,10 @@ stimulus, response, or other experimental event occurred. Those event markers
 are used to segment continuous recordings into trials and to form
 event-related potentials (ERPs), where millisecond-scale timing error can
 blur the relationship between neural activity and the event under study
-[@luck2014]. EGI Net Station and Amp Server Pro systems accept such markers
+[@luck2014; @bridges2020]. EGI Net Station and Amp Server Pro systems accept such markers
 through their Experimental Control Interface (ECI), a network protocol that
 also provides commands for setting the event-timestamp epoch using the Network
-Time Protocol (NTP) [@egi2015].
+Time Protocol (NTP) [@egi2015; @mills2010ntp].
 
 At the start of a recording, an ECI `NTPClockSync` command transmits the
 current NTP time to Net Station and establishes the reference epoch from which
@@ -163,7 +163,19 @@ path, and explicit drift management gives laboratories a reusable alternative
 to bespoke hardware-control code. It is particularly useful for EEG projects
 that want the transparency and reproducibility of Python and PsychoPy without
 asking each experiment author to reconstruct the acquisition system's timing
-semantics.
+semantics. Lab Streaming Layer (LSL) addresses the same broad synchronization
+problem through a different architecture, providing common time bases for
+multiple streamed data sources on a local network [@kothe2025lab]. In contrast,
+`egi-pynetstation` directly controls EGI acquisition and maintains its ECI
+event-time epoch. Its photocell validation demonstrates practical event-timing
+precision at the 1 to 3 ms scale, making either approach suitable for many
+millisecond-sensitive neurobehavioral workflows while serving different
+experimental architectures. Recent vendor-supported LSL connectivity for EGI
+AmpServer hardware makes a direct, same-hardware comparison of ECI-derived
+event timestamps and LSL stream timestamps feasible. Such a benchmark would
+distinguish agreement in practical event timing from differences in
+synchronization architecture and is a natural next validation for
+`egi-pynetstation`.
 
 # AI usage disclosure
 
