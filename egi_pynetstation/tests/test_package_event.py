@@ -118,7 +118,7 @@ def test_invalid_label_type():
             valid_description,
             valid_data
         )
-    assert 'Event label should be <= 256 characters' in str(e.value)
+    assert 'Event label should be <= 255 characters' in str(e.value)
 
 
 def test_invalid_description_type():
@@ -142,7 +142,7 @@ def test_invalid_description_type():
             ' ' * 257,
             valid_data
         )
-    assert 'Event description should be <= 256 characters' in str(e.value)
+    assert 'Event description should be <= 255 characters' in str(e.value)
 
 
 def test_invalid_data_types():
@@ -238,3 +238,30 @@ def test_check_valid_output():
     )
 
     assert result == expected
+
+
+def test_label_and_desc_boundary_lengths_pack():
+    """255 characters must pack; 256 must raise our error, not struct's.
+
+    The length is written with pack('B', ...), an unsigned char capped at
+    255. Validation used to allow <= 256, so a 256-character label cleared
+    the check and then died with an opaque struct.error deep in packing
+    instead of the readable TypeError the check exists to produce.
+    """
+    # The longest accepted values pack without error.
+    package_event(
+        valid_start, valid_duration, valid_type,
+        'l' * 255, 'd' * 255, valid_data,
+    )
+
+    # One over the wire format's limit is rejected by us, cleanly.
+    for label, desc, expected in (
+        ('l' * 256, valid_description, 'Event label should be <= 255'),
+        (valid_label, 'd' * 256, 'Event description should be <= 255'),
+    ):
+        with pytest.raises(TypeError) as err:
+            package_event(
+                valid_start, valid_duration, valid_type,
+                label, desc, valid_data,
+            )
+        assert expected in str(err.value)

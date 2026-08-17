@@ -141,7 +141,8 @@ Useful options beyond the defaults::
     --drift-samples N          NTP queries per drift sample (default 4)
     --drift-sample-spacing S   seconds between queries in a burst (0.05)
     --drift-min-pause S        minimum ITI required to sample (0.35)
-    --drift-background         sample from a background thread instead
+    --drift-cooperative        advanced: sample during ITIs instead of the
+                               background thread the script uses by default
     --drift-slew R             max level-correction rate (0.0002)
     --drift-max-model-age S    stop extrapolating after this age (600)
     --drift-stall-after N      rejected fits before logging a stall (5)

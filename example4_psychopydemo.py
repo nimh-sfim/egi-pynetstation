@@ -16,13 +16,14 @@ Two behaviours do the work:
                       from ordinary experiment code. Pass wait=True only
                       if you need the ECI response back.
 
-  configure_auto_drift()  the package tracks when the next NTP drift
-                      sample is due; your experiment decides when it is
-                      safe to take one by calling sample_drift_if_due()
-                      during an inter-trial interval.
+  background drift sampling  the package keeps its clock model current
+                      on its own thread. Nothing in the trial loop has to
+                      ask for a sample. This is the default, and it is
+                      spelled out in connect() below so it is obvious
+                      what the experiment relies on.
 
-Drift correction and drift sampling are both enabled by default, and
-neither sends repeated ECI clock-sync commands.
+Drift correction and background drift sampling are both enabled by
+default, and neither sends repeated ECI clock-sync commands.
 """
 
 from psychopy import core, visual
@@ -39,13 +40,14 @@ IP_amp = '10.10.10.51'  # amplifier / Net Station NTP server
 ns = NetStation(IP_ns, port_ns)
 ns.connect(
     ntp_ip=IP_amp,
-    # Drift correction and the sampling schedule are both on by default,
-    # so only the tuning is passed here. The package owns the schedule;
-    # the experiment owns the timing safety window and calls
-    # sample_drift_if_due() below. Nothing is sampled without that call
-    # unless auto_drift_background=True.
+    # All three of these are already the defaults. They are written out
+    # so the recommended configuration is visible at a glance: correct
+    # for drift, sample automatically, and do the sampling on the
+    # package's own thread so the trial loop never has to.
+    drift_correction=True,
+    auto_drift=True,
+    auto_drift_background=True,
     auto_drift_interval=15.0,
-    auto_drift_min_pause=0.35,
 )
 
 win = visual.Window(fullscr=True, screen=0, color='black', units='height')
@@ -72,20 +74,12 @@ try:
         win.flip()
         core.wait(0.5)
 
-        # Clear the screen and use the inter-trial interval. Tell the
-        # package how much idle time it may use; it samples only when a
-        # sample is due and there is room for it. This is an NTP query
-        # only -- it does not send an ECI clock-sync command or create a
-        # marker.
+        # Clear the screen for the inter-trial interval. Drift sampling
+        # needs nothing here: the background thread handles it. An
+        # experiment that wanted to control exactly when NTP queries
+        # happen would pass auto_drift_background=False and call
+        # ns.sample_drift_if_due(available_pause=1.0) at this point.
         win.flip()
-        status = ns.sample_drift_if_due(available_pause=1.0)
-        if status['sampled']:
-            sample = status['sample']
-            print(
-                'NTP drift sample: offset={offset:.6f}s '
-                'delay={delay:.6f}s valid={valid}'.format(**sample)
-            )
-
         core.wait(1.0)
 
     print('Drift estimate:', ns.drift_estimate())

@@ -44,7 +44,7 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             auto_drift=True,
             auto_drift_interval=args.sample_interval,
             auto_drift_min_pause=args.drift_min_pause,
-            auto_drift_background=args.drift_background,
+            auto_drift_background=not args.drift_cooperative,
         )
     except TypeError as err:
         # Fail loudly rather than silently validating different code. The
@@ -395,13 +395,14 @@ def build_parser() -> ArgumentParser:
         ),
     )
     parser.add_argument(
-        '--drift-background',
+        '--drift-cooperative',
         action='store_true',
         help=(
-            'Sample NTP drift from a background thread instead of during '
-            'inter-trial intervals. Removes the need for the experiment to '
-            'cooperate, at the cost of a network wakeup that may land near '
-            'a flip'
+            'Advanced: sample NTP drift only during inter-trial intervals, '
+            'via sample_drift_if_due(available_pause=...), instead of the '
+            'default background thread. Gives explicit control over when '
+            'NTP queries happen, at the cost of needing the wait-window '
+            'call below to actually fire on every trial'
         ),
     )
     parser.add_argument(
@@ -516,15 +517,16 @@ def main(argv=None) -> int:
         ns.send_command('BeginRecording')
         ns.ntpsync()
 
-        # Auto-drift is configured in connect(). This script owns the
-        # timing-safety window and passes the real inter-trial gap to
-        # sample_drift_if_due() unless --drift-background is set.
+        # Auto-drift is configured in connect(): background sampling by
+        # default, or cooperative (this script owns the timing-safety
+        # window and passes the real inter-trial gap to
+        # sample_drift_if_due()) if --drift-cooperative was given.
         ns.set_drift_stability(stall_after=args.drift_stall_after)
         print(f'Event send mode: {send_mode}')
         print(
             'Drift sampling: '
-            + ('background thread' if args.drift_background
-               else 'inter-trial intervals')
+            + ('inter-trial intervals (cooperative, advanced)'
+               if args.drift_cooperative else 'background thread (default)')
         )
         print('Press q or escape to stop early; the log is still written.')
         if args.ntpsync_every:
@@ -733,13 +735,31 @@ def main(argv=None) -> int:
             records.append(record)
 
             # Idle time between the dot going off and the next dot onset.
+            #
+            # In frame mode this MUST be a local estimate (this ISI's frame
+            # budget), not derived from cumulative next_onset bookkeeping.
+            # next_onset is a nominal, frame-count-only clock that assumes
+            # zero time passes except during flips. A drift-sample burst
+            # blocks for ~170 ms without producing a flip, so cumulative
+            # "next_onset - exp_clock.getTime()" quietly falls behind real
+            # time by ~170 ms per sample taken -- and never recovers, since
+            # once available_pause drops below the threshold, sampling
+            # stops, which stops the debt from growing but never repays it.
+            # Fifteen samples were enough to freeze sampling for the rest
+            # of an hour-long run. A per-trial local estimate can't
+            # accumulate debt because it carries no memory between trials.
             if trial < len(isis):
-                available_pause = (
-                    next_onset + isis[trial] - exp_clock.getTime()
-                )
+                if args.clock_timing:
+                    available_pause = (
+                        next_onset + isis[trial] - exp_clock.getTime()
+                    )
+                else:
+                    available_pause = (
+                        isi_frames[trial] - dot_frames
+                    ) * frame_period
             else:
                 available_pause = None
-            if not args.drift_background:
+            if args.drift_cooperative:
                 record_drift_sample_if_due(available_pause)
 
         ns.flush_events()

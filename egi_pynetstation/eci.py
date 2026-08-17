@@ -272,8 +272,8 @@ def package_event(
     sync
     duration: the duration of the event in SECONDS
     event_type: a four-character string indicating the event type
-    label: a <=256-character string for labeling the event
-    desc: a <=256-character string for describing the event
+    label: a <=255-character string for labeling the event
+    desc: a <=255-character string for describing the event
     data: a dictionary where each value is a string, number, or boolean,
         and each key is a string. Use this to pass data.
     """
@@ -309,18 +309,21 @@ def package_event(
     if not isinstance(label, str):
         raise TypeError(f'Event label should be str, is {type_label}')
     len_label = len(label)
-    if not len_label <= 256:
+    # Bound is 255, not 256: the length is packed with pack('B', ...),
+    # an unsigned char. A 256-character label used to clear this check
+    # and then die with an opaque struct.error during packing.
+    if not len_label <= 255:
         raise TypeError(
-            f'Event label should be <= 256 characters, is {len_label}'
+            f'Event label should be <= 255 characters, is {len_label}'
         )
     if not isinstance(desc, str):
         raise TypeError(
             f'Event description should be str, is {type_desc}'
         )
     len_desc = len(desc)
-    if not len_desc <= 256:
+    if not len_desc <= 255:
         raise TypeError(
-            'Event description should be <= 256 characters, is' +
+            'Event description should be <= 255 characters, is ' +
             f'{len_desc}'
         )
     if not isinstance(data, dict):

@@ -34,29 +34,22 @@ The short version
     from egi_pynetstation import NetStation
 
     ns = NetStation('10.10.10.42', 55513)
-    ns.connect(
-        ntp_ip='10.10.10.51',
-        auto_drift_interval=15.0,
-    )
+    ns.connect(ntp_ip='10.10.10.51')   # drift sampling starts on its own thread
     ns.begin_rec()
 
     # In a visual experiment, mark the flip that shows the stimulus.
     win.callOnFlip(ns.send_event, event_type='stm+')
     win.flip()
 
-    # In an inter-trial interval, let the clock model stay current.
-    ns.sample_drift_if_due(available_pause=1.0)
-
     ns.end_rec()
     ns.disconnect()
 
 Three things are worth knowing before you write anything else:
 
-1. **Drift correction and the sampling schedule are both on by default,
-   but something still has to take the samples.** Either call
-   :meth:`~egi_pynetstation.NetStation.NetStation.sample_drift_if_due`
-   during quiet periods, or pass ``auto_drift_background=True`` and let
-   the package handle it on its own thread. See :doc:`drift`.
+1. **Drift correction is on by default, and so is sampling for it** — a
+   background thread takes NTP samples on its own, so there is nothing to
+   wire up. Advanced use cases can take over sampling manually instead;
+   see :doc:`drift`.
 2. **Send events from the flip callback.**
    :meth:`~egi_pynetstation.NetStation.NetStation.send_event` never
    blocks, so it is safe there. See :doc:`psychopy`.

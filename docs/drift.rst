@@ -48,113 +48,75 @@ elapsed time.
      - off
      - No drift machinery at all.
 
-Both default to ``True``, so the working configuration is what you get
-without asking. What remains yours to arrange is *who takes the samples* —
-see the next two sections.
+Both default to ``True``, and by default the package also takes care of
+*who* collects the samples — see the next section.
 
 .. _recommended-setup:
 
-Recommended setup
------------------
+Default: background sampling
+-----------------------------
 
-**Keep the defaults and sample during inter-trial intervals.** Drift
-correction and the sampling schedule are both on already, so all that is
-left is tuning the interval and calling
-:meth:`~egi_pynetstation.NetStation.NetStation.sample_drift_if_due`. That
-is the configuration validated over repeated one-hour photocell runs.
+**Nothing to configure.** As soon as ``drift_correction`` and
+``auto_drift`` are on — which they are unless you turn them off — the
+package samples NTP on its own background thread. This is the
+configuration validated over repeated one-hour photocell runs, including
+the cleanest run in the whole series (steady-state standard deviation
+1.14 ms, zero outliers).
+
+.. code-block:: python
+
+    ns.connect(ntp_ip='10.10.10.51')   # background sampling starts here
+
+No ``sample_drift_if_due()`` calls, no inter-trial-interval bookkeeping,
+and no failure mode where an experiment forgets to sample: the thread
+runs regardless of what the rest of your code does.
+
+The NTP query itself runs outside every lock, so a sample cannot block
+:meth:`~egi_pynetstation.NetStation.NetStation.getTime` by more than a
+few microseconds — measured at 14 µs median across an hour-long run with
+the thread active throughout. A background sample can in principle land
+near a screen flip; in every direct comparison run against cooperative
+sampling so far, this has not been observed to cost anything.
+
+Tune the interval if you want to, same as before:
+
+.. code-block:: python
+
+    ns.connect(ntp_ip='10.10.10.51', auto_drift_interval=15.0)
+
+.. _advanced-manual-sampling:
+
+Advanced: manual sampling
+--------------------------
+
+Background sampling is the right choice for almost everyone. The two
+options below exist for cases where you need explicit control over
+*exactly* when an NTP query happens — for example, to guarantee one never
+coincides with a specific critical window that background sampling's
+own timing can't promise to avoid, or because your experiment already has
+natural quiet points and you would rather use them deliberately than run
+a second thread at all.
+
+**Polling in a wait window.** Turn off background sampling and call
+:meth:`~egi_pynetstation.NetStation.NetStation.sample_drift_if_due` from
+a point you know is safe — an inter-trial interval, a fixation, a rest
+screen:
 
 .. code-block:: python
 
     ns.connect(
         ntp_ip='10.10.10.51',
-        auto_drift_interval=15.0,     # a sample every 15 s
-        auto_drift_min_pause=0.35,    # only in gaps at least this long
+        auto_drift_interval=15.0,      # a sample every 15 s
+        auto_drift_min_pause=0.35,     # only in gaps at least this long
+        auto_drift_background=False,   # you are taking over the sampling
     )
 
-then, in each inter-trial interval:
-
-.. code-block:: python
-
+    # In each inter-trial interval:
     ns.sample_drift_if_due(available_pause=iti_remaining)
 
-This is the arrangement used by :doc:`example3_stroop.py <examples>` and
-by the photocell validator. It keeps NTP queries away from screen flips
-by construction, because your experiment is the thing that knows when a
-safe gap exists.
-
-.. warning::
-
-   ``auto_drift`` sets a **schedule**, not a worker.
-   ``sample_drift_if_due()`` is the only thing that acts on it. Because
-   the schedule is on by default, it is easy to assume sampling is
-   handled: an experiment that never calls it collects no samples at all,
-   drift correction never engages, and nothing else complains.
-
-   ``disconnect()`` will warn if it detects this, and writes a
-   ``drift_undersampled`` record to the error log — but that is a safety
-   net, not a substitute for arranging the sampling.
-
-Background sampling
--------------------
-
-If your experiment has no convenient inter-trial intervals, or you would
-simply rather not think about it, the package can sample on its own
-thread:
-
-.. code-block:: python
-
-    ns.connect(
-        ntp_ip='10.10.10.51',
-        auto_drift_interval=15.0,
-        auto_drift_background=True,
-    )
-
-Nothing else is required — no ``sample_drift_if_due()`` calls, and the
-undersampling failure mode disappears entirely.
-
-The tradeoff is small but real. The NTP query itself runs outside every
-lock, so a background sample cannot block ``getTime()`` by more than a
-few microseconds. What it *can* do is put a network wakeup and a thread
-switch near a screen flip, which the cooperative arrangement avoids by
-design.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 22 39 39
-
-   * -
-     - Cooperative *(recommended)*
-     - Background
-   * - Setup
-     - nothing; it is the default
-     - ``auto_drift_background=True``
-   * - Your experiment must
-     - call ``sample_drift_if_due()`` in quiet periods
-     - nothing
-   * - Sampling near a flip
-     - never, by construction
-     - possible
-   * - Forgetting to wire it up
-     - no samples collected
-     - cannot happen
-   * - Best for
-     - visual experiments with usable ITIs
-     - long runs, non-visual work, anything without clean gaps
-
-Both can also be set after connecting, or changed mid-session:
-
-.. code-block:: python
-
-    ns.configure_auto_drift(enabled=True, interval=15.0, background=False)
-
-Sampling by hand
-----------------
-
-To manage the schedule yourself, call
-:meth:`~egi_pynetstation.NetStation.NetStation.sample_drift` from a point
-you know is safe. It returns the recorded sample.
-
-``sample_drift_if_due()`` returns a status dictionary instead:
+The package still owns the *schedule* (when a sample is due); your code
+owns the *safety window* (whether now is a safe moment to take one). It
+returns a status dictionary:
 
 .. code-block:: python
 
@@ -167,11 +129,51 @@ you know is safe. It returns the recorded sample.
 Omit ``available_pause`` if your intervals are comfortably long and you
 do not want the length check.
 
+.. warning::
+
+   With ``auto_drift_background=False``, ``sample_drift_if_due()`` is
+   the **only** thing that ever takes a sample. An experiment that
+   forgets to call it collects nothing, and drift correction never
+   engages, silently. This is exactly the failure mode background
+   sampling exists to remove — before choosing this path, make sure
+   the wait-window call really will fire on every trial.
+
+   ``disconnect()`` warns if it detects this, and writes a
+   ``drift_undersampled`` record to the error log — but that is a
+   safety net, not a substitute for the call actually happening.
+
+**Forcing a sample right now.** For the most extreme control — a single
+sample at a specific, deliberately chosen instant, bypassing the schedule
+and any pause check entirely — call
+:meth:`~egi_pynetstation.NetStation.NetStation.sample_drift` directly:
+
+.. code-block:: python
+
+    sample = ns.sample_drift()
+
+This ignores ``auto_drift`` entirely: it takes a sample unconditionally,
+whether or not automatic sampling is enabled or in the middle of a
+background cycle. It is what a warm-up loop uses (see
+:doc:`psychopy`'s "All the commands you need to know" section) to collect
+evidence during instructions, before the first trial, faster than the
+schedule would on its own.
+
 .. note::
 
-   Drift samples are **NTP queries only**. They send no ECI clock-sync
-   command and create no markers in the recording. They are safe to take
-   as often as you like, subject only to blocking the calling thread.
+   Drift samples are **NTP queries only**, in every one of these modes.
+   None of them send an ECI clock-sync command or create a marker in the
+   recording. They are safe to take as often as you like, subject only
+   to blocking the calling thread for the duration of the burst.
+
+Any of this can also be changed after connecting, or mid-session — for
+example, to drop into manual control for one deliberately sensitive
+stretch and hand control back to the background thread afterwards:
+
+.. code-block:: python
+
+    ns.configure_auto_drift(background=False)   # take over temporarily
+    ...
+    ns.configure_auto_drift(background=True)    # hand it back
 
 Burst sampling
 --------------
@@ -335,8 +337,9 @@ Settings reference
      - ``0.35`` s
      - Minimum idle time before a cooperative sample is taken.
    * - ``auto_drift_background``
-     - ``False``
-     - Sample from a package-owned thread.
+     - ``True``
+     - Sample from a package-owned thread. Set ``False`` for manual,
+       advanced control instead. See :ref:`advanced-manual-sampling`.
 
 Checking that it worked
 -----------------------

@@ -8,7 +8,7 @@ order. Five of those are congruent (word matches ink), twenty incongruent.
 
 This is a reference for the smallest clean egi_pynetstation setup. Every
 line that talks to the amplifier is marked with an "EGI:" comment. There
-are only eight of them:
+are only seven of them:
 
     1. NetStation(...)                 create the connection
     2. ns.connect(...)                 connect; events send off-thread
@@ -16,8 +16,10 @@ are only eight of them:
     4. ns.sample_drift()               warm the clock model up
     5. win.callOnFlip(ns.send_event)   mark stimulus onset on the flip
     6. ns.send_event(...)              mark the button press
-    7. ns.sample_drift_if_due(...)     let the clock model stay current
-    8. ns.end_rec() / ns.disconnect()  stop cleanly
+    7. ns.end_rec() / ns.disconnect()  stop cleanly
+
+Ongoing drift sampling needs no call at all -- it runs on the package's
+own background thread, which is the default.
 
 Markers written to the recording:
 
@@ -121,16 +123,18 @@ def main():
     # EGI 2: connect. send_event() is non-blocking -- it captures the
     # timestamp and hands the socket write to a background thread -- which
     # is what makes it safe to call from a flip callback.
-    # Drift correction and drift sampling are both on by default;
-    # auto_drift_interval only tunes how often the clock model is
-    # refreshed. The experiment still decides when it is safe, by calling
-    # sample_drift_if_due() during the ITI. Without that call nothing is
-    # sampled -- pass auto_drift_background=True if you would rather the
-    # package sample on its own thread.
+    #
+    # Drift correction and background drift sampling are both on by
+    # default; they are spelled out here so it is obvious what the
+    # experiment is relying on. With auto_drift_background=True the
+    # package samples NTP on its own thread, so the trial loop below never
+    # has to ask for a sample.
     ns.connect(
         ntp_ip=IP_AMP,
-        auto_drift_interval=30.0,
-        auto_drift_min_pause=0.35,
+        drift_correction=True,
+        auto_drift=True,
+        auto_drift_background=True,
+        auto_drift_interval=15.0,
     )
 
     win = visual.Window(fullscr=True, color='black', units='height')
@@ -259,10 +263,11 @@ def main():
             # --- inter-trial interval ---
             win.flip()
 
-            # EGI 7: offer the package the idle time it may use. It samples
-            # only if one is due and the pause is long enough, so this never
-            # lands near a flip.
-            ns.sample_drift_if_due(available_pause=ITI_S)
+            # Nothing to do here for drift: the background sampler takes
+            # care of it. An experiment that wanted explicit control over
+            # exactly when NTP queries happen would pass
+            # auto_drift_background=False and call
+            # ns.sample_drift_if_due(available_pause=ITI_S) right here.
             core.wait(ITI_S)
 
         # --- summary ---
@@ -280,7 +285,7 @@ def main():
         if errors:
             print(f'WARNING: {len(errors)} events failed to send:', errors[:3])
     finally:
-        # EGI 8: close cleanly. Both of these flush any queued events first,
+        # EGI 7: close cleanly. Both of these flush any queued events first,
         # so markers sent on the last trial still reach Net Station.
         if recording:
             ns.end_rec()

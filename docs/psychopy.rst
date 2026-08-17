@@ -11,11 +11,7 @@ to configure.
     from egi_pynetstation import NetStation
 
     ns = NetStation('10.10.10.42', 55513)
-    ns.connect(
-        ntp_ip='10.10.10.51',
-        auto_drift_interval=15.0,
-        auto_drift_min_pause=0.35,
-    )
+    ns.connect(ntp_ip='10.10.10.51')   # drift sampling starts on its own thread
 
     win = visual.Window(fullscr=True, screen=1, color='black')
     stim = visual.TextStim(win, text='+')
@@ -28,11 +24,6 @@ to configure.
             win.callOnFlip(ns.send_event, event_type='stm+', label='stimulus')
             win.flip()
             core.wait(0.5)
-
-            # Inter-trial interval: offer the package the idle time it may
-            # use. It samples only if one is due and there is room for it.
-            win.flip()
-            ns.sample_drift_if_due(available_pause=1.0)
             core.wait(1.0)
     finally:
         ns.end_rec()      # flushes any queued events
@@ -52,16 +43,17 @@ is diagnostics or tuning.
 ^^^^^^^^^^^^^^^^^^^
 
 Opens the ECI connection and configures the clock machinery. Drift
-correction and the sampling schedule are both on already, so the only
-arguments most experiments pass are the amplifier address and the
-sampling interval.
+correction is on already, and so is sampling for it — a background thread
+takes NTP samples on its own, so most experiments only need the amplifier
+address:
 
 .. code-block:: python
 
-    ns.connect(ntp_ip='10.10.10.51', auto_drift_interval=15.0)
+    ns.connect(ntp_ip='10.10.10.51')
 
-Add ``auto_drift_background=True`` if you would rather the package take
-the samples itself. See :doc:`drift` for the full set.
+Pass ``auto_drift_background=False`` if you need explicit control over
+exactly when sampling happens instead. See :doc:`drift` for the full set
+and the advanced manual-sampling options.
 
 ``ns.begin_rec()``
 ^^^^^^^^^^^^^^^^^^
@@ -117,15 +109,20 @@ flip callback marks the flip, and calling it from your trial loop marks
 that line of code — both are equally precise. Returns ``None``; pass
 ``wait=True`` only if you need the amplifier's reply.
 
-``ns.sample_drift_if_due(available_pause=...)``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+``ns.sample_drift_if_due(available_pause=...)`` *(advanced)*
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Takes an NTP drift sample, but only if one is due and the gap you offer
-is long enough. Call it during a quiet stretch — an inter-trial interval,
-a fixation, a rest screen.
+Background sampling already covers this for you. You only need this
+call if you have opted out of it with ``auto_drift_background=False``,
+to get explicit control over exactly when NTP queries happen. It takes
+a sample, but only if one is due and the gap you offer is long enough.
+Call it during a quiet stretch — an inter-trial interval, a fixation, a
+rest screen.
 
 .. code-block:: python
 
+    ns.connect(ntp_ip='10.10.10.51', auto_drift_background=False)
+    ...
     ns.sample_drift_if_due(available_pause=1.0)
 
 ``available_pause`` is how much idle time you can safely give up, in
@@ -134,11 +131,12 @@ queries away from your flips.
 
 .. important::
 
-   Unless you set ``auto_drift_background=True``, this call — or
+   With ``auto_drift_background=False``, this call — or
    ``sample_drift()`` below — is **the only thing that ever takes a
    sample.** Skip both and the drift model never gets any data, so
    correction never engages, and nothing will interrupt your experiment
-   to tell you.
+   to tell you. This is exactly the failure mode background sampling
+   exists to remove.
 
 ``ns.sample_drift()``
 ^^^^^^^^^^^^^^^^^^^^^
@@ -238,8 +236,10 @@ it shrinks as real samples arrive during the run. Thirteen samples over
    the NTP sync it performs is what establishes the clock the samples are
    measured against. Calling it earlier raises ``RuntimeError``.
 
-Rule of thumb: ``sample_drift_if_due()`` in your trial loop, where the
-schedule should decide; ``sample_drift()`` outside it, where you decide.
+Rule of thumb: leave sampling to the background thread unless you have a
+specific reason not to. If you do, use ``sample_drift_if_due()`` in your
+trial loop, where the schedule should decide; ``sample_drift()`` outside
+it — a warm-up loop, a rest break — where you decide.
 
 ``ns.end_rec()``
 ^^^^^^^^^^^^^^^^

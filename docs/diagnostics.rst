@@ -20,6 +20,8 @@ Related accessors:
   current fit and prediction.
 * :meth:`~egi_pynetstation.NetStation.NetStation.event_errors` — failures
   from asynchronous sends.
+* :meth:`~egi_pynetstation.NetStation.NetStation.eci_errors` — ECI
+  responses that failed or did not parse, recorded rather than raised.
 * :meth:`~egi_pynetstation.NetStation.NetStation.pending_events` — how
   many events are still queued.
 
@@ -147,12 +149,39 @@ Reading a log:
                   'model age:', record['clock']['drift_model_age'],
                   'rejected fits:', record['clock']['drift_rejected_fits'])
 
-.. note::
+Failed ECI responses
+--------------------
 
-   An unparseable ECI response is *reported*, not raised.
-   ``send_event(wait=True)`` returns a diagnostic dictionary with
-   ``ok: False`` rather than throwing, so a single bad reply cannot end a
-   recording.
+A response the amplifier rejects, or one that does not parse at all, is
+**recorded rather than raised**. ``send_event(wait=True)`` returns a
+diagnostic dictionary with ``ok: False`` instead of throwing, so a single
+bad reply cannot end a recording in progress.
+
+Every one of them is kept where you can find it afterwards:
+
+.. code-block:: python
+
+    for failure in ns.eci_errors():
+        print(failure['cmd'], failure['error'], failure['raw_display'])
+
+``eci_errors()`` holds the most recent 100 failures with the command that
+caused them and, for events, the ``event_type`` and ``label`` — so a bad
+marker can be traced to its trial without opening the log file. The count
+also appears in :meth:`~egi_pynetstation.NetStation.NetStation.session_summary`
+as ``eci_response_failures``, and any non-zero value makes ``ok`` False.
+The error log, if configured, keeps the complete history.
+
+If you would rather stop at the first sign of trouble — a diagnostic
+session rather than a live recording — opt into raising:
+
+.. code-block:: python
+
+    ns.connect(ntp_ip='10.10.10.51', strict_eci=True)
+    # or, at any point:
+    ns.set_strict_eci(True)
+
+That applies uniformly to unparseable responses and to failures the
+amplifier reports.
 
 Interactive ECI console
 -----------------------

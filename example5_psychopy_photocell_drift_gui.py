@@ -75,8 +75,8 @@ FIELDS = [
      '--drift-sample-spacing', 'value'),
     ('drift_min_pause_s', 'Minimum ITI to sample in (s)', 0.35,
      '--drift-min-pause', 'value'),
-    ('drift_background', 'Sample from a background thread', False,
-     '--drift-background', 'flag'),
+    ('drift_cooperative', 'Advanced: sample only during ITIs, not '
+     'background', False, '--drift-cooperative', 'flag'),
 
     ('__section__', 'Drift model stability', None, None, 'section'),
     ('drift_slew', 'Max level correction rate (s per s)', 0.0002,

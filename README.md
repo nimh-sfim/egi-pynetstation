@@ -104,7 +104,7 @@ from psychopy import visual, core
 from egi_pynetstation import NetStation
 
 ns = NetStation('10.10.10.42', 55513)
-ns.connect(ntp_ip='10.10.10.51', auto_drift_interval=15.0)
+ns.connect(ntp_ip='10.10.10.51')   # drift sampling starts on its own thread
 
 win = visual.Window(fullscr=True, screen=1, color='black')
 stim = visual.TextStim(win, text='+')
@@ -117,10 +117,6 @@ try:
         win.callOnFlip(ns.send_event, event_type='stm+', label='stimulus')
         win.flip()
         core.wait(0.5)
-
-        # Inter-trial interval. Tell the package how much idle time it may
-        # use; it samples only when one is due and there is room for it.
-        ns.sample_drift_if_due(available_pause=1.0)
         core.wait(1.0)
 finally:
     ns.end_rec()      # flushes any queued events
@@ -210,48 +206,68 @@ correction only happens when both are in play:
 | off | on | No samples collected, so correction never engages. An explicit `sample_drift()` still works. |
 | off | off | No drift machinery at all. |
 
-Both default to `True`. What remains yours to arrange is *who takes the
-samples*.
+Both default to `True`, and by default the package also takes care of *who*
+takes the samples: as soon as `auto_drift` is on, a background thread
+samples NTP on its own. Nothing to configure:
+
+```python
+ns.connect(ntp_ip='10.10.10.51')   # background sampling starts here
+```
+
+This is the configuration validated over repeated one-hour photocell runs,
+including the cleanest run in the whole series (steady-state sd 1.14 ms,
+zero outliers). The NTP query runs outside every lock, so a sample cannot
+block `getTime()` by more than a few microseconds — measured at 14 us
+median across an hour with the thread running the whole time. A background
+sample can in principle land near a screen flip; in every direct comparison
+against manual sampling so far, this has not been observed to cost
+anything.
 
 Drift samples are NTP queries. They do **not** send ECI clock-sync commands
 and do not create markers. They do block the calling thread for roughly
-170 ms at default settings, so they must not land near a flip.
+170 ms at default settings, which is why they run on their own thread by
+default rather than in yours.
 
-**Auto-drift is a schedule, not a worker — nothing polls it.** The schedule
-is enabled by default, but `sample_drift_if_due()` is the only thing that
-acts on it, so an experiment that never calls it collects no samples at all
-and drift correction never engages. There are two ways to arrange the
-sampling.
+### Advanced: Manual Sampling
 
-**Cooperative (default).** The package owns the schedule, your experiment
-owns the timing-safety window:
+Background sampling is the right choice for almost everyone. Two options
+exist for when you need explicit control over exactly when an NTP query
+happens — for example, to guarantee one never coincides with a specific
+critical window.
+
+**Polling in a wait window.** Turn off background sampling and call
+`sample_drift_if_due()` yourself from a point you know is safe:
 
 ```python
-ns.connect(ntp_ip=..., auto_drift_interval=15.0,
-           auto_drift_min_pause=0.35)
+ns.connect(ntp_ip=..., auto_drift_interval=15.0, auto_drift_min_pause=0.35,
+           auto_drift_background=False)
 ns.sample_drift_if_due(available_pause=iti_remaining)   # in your ITI
 ```
 
-**Background.** The package samples on its own, no cooperation needed:
+The package still owns the schedule; your code owns the safety window.
+
+> **Warning:** with `auto_drift_background=False`, `sample_drift_if_due()`
+> is the *only* thing that ever takes a sample. An experiment that forgets
+> to call it collects nothing, and drift correction never engages, silently
+> — exactly the failure mode background sampling exists to remove.
+> `disconnect()` warns and writes a `drift_undersampled` record if it
+> detects this, but that is a safety net, not a substitute for the call
+> actually happening.
+
+**Forcing a sample right now.** For a single sample at a specific,
+deliberately chosen instant — bypassing the schedule and any pause check —
+call `sample_drift()` directly:
 
 ```python
-ns.connect(ntp_ip=..., auto_drift_background=True)
+sample = ns.sample_drift()
 ```
 
-Either can also be set after connecting, or changed mid-session, with
-`ns.configure_auto_drift(enabled=True, interval=15.0, background=False)`.
+This ignores `auto_drift` entirely. It's what a warm-up loop uses to
+collect evidence during instructions, before the first trial.
 
-The NTP query runs outside every lock, so a background sample cannot block
-`getTime()` by more than a few microseconds. What it *can* do is put a
-network wakeup near a screen flip. Prefer the cooperative form for visual
-experiments with usable inter-trial intervals, and background for anything
-else — especially long runs, where a forgotten call would quietly cost you
-drift correction for the whole session.
-
-If auto-drift is enabled, sampling is cooperative, and far fewer samples
-were collected than the interval implies, `disconnect()` logs a warning and
-writes a `drift_undersampled` record. That is the safety net, not a
-substitute for arranging the sampling.
+Either can be changed after connecting, or mid-session:
+`ns.configure_auto_drift(background=False)` to take over temporarily,
+`ns.configure_auto_drift(background=True)` to hand it back.
 
 `available_pause` is how much idle time you can safely give up. If a sample
 is not due yet, or the pause you offered is too short, the call returns
@@ -267,9 +283,6 @@ Return values:
 {'sampled': False, 'reason': 'disabled'}
 {'sampled': False, 'reason': 'not_synced'}
 ```
-
-To manage the schedule yourself, call `ns.sample_drift()` from a point you
-know is safe.
 
 Each call makes several rapid NTP queries and keeps the lowest-delay reply.
 NTP offset error tracks path asymmetry, which tracks round-trip delay, so
@@ -813,9 +826,36 @@ for line in open('session_errors.jsonl'):
               'rejected fits:', r['clock']['drift_rejected_fits'])
 ```
 
-Note that an unparseable response is *reported*, not raised: `send_event()`
-with `wait=True` returns a diagnostic dictionary with `ok: False` rather
-than throwing, so a single bad reply cannot end a recording.
+### Failed ECI Responses
+
+A response the amplifier rejects, or one that does not parse at all, is
+**recorded rather than raised** — `send_event(wait=True)` returns a
+diagnostic dictionary with `ok: False` instead of throwing, so a single bad
+reply cannot end a recording in progress.
+
+They stay inspectable afterwards:
+
+```python
+for failure in ns.eci_errors():
+    print(failure['cmd'], failure['error'], failure['raw_display'])
+```
+
+`eci_errors()` keeps the most recent 100, each with the command that caused
+it and — for events — the `event_type` and `label`, so a bad marker traces
+back to its trial without opening the log. `session_summary()` reports the
+total as `eci_response_failures`, and any non-zero value makes `ok` False.
+The error log holds the complete history.
+
+To stop at the first sign of trouble instead — a diagnostic session rather
+than a live recording — opt into raising:
+
+```python
+ns.connect(ntp_ip='10.10.10.51', strict_eci=True)
+ns.set_strict_eci(True)          # or at any point during a session
+```
+
+That applies uniformly to unparseable responses and to failures the
+amplifier reports.
 
 ---
 
@@ -840,8 +880,8 @@ happens only when user code calls `ns.sample_drift()` or
 | `drift_max_model_age` | `600.0` s | Stop extrapolating a fitted slope after this age; the correction then holds. `0` is unbounded. |
 | `auto_drift` | `True` | Enable the drift sampling schedule. Pass `False` to disable. |
 | `auto_drift_interval` | `15.0` s | Target seconds between drift samples. |
-| `auto_drift_min_pause` | `0.35` s | Minimum idle time before a cooperative sample is taken. Cooperative sampling only. |
-| `auto_drift_background` | `False` | Sample from a package-owned thread rather than requiring `sample_drift_if_due()`. |
+| `auto_drift_min_pause` | `0.35` s | Minimum idle time before a manual sample is taken. Only used with `auto_drift_background=False`. |
+| `auto_drift_background` | `True` | Sample from a package-owned thread. Set `False` for manual, advanced control instead. |
 
 The same four settings are reachable after connecting through
 `configure_auto_drift()`, under shorter names — `enabled`, `interval`,
@@ -867,6 +907,8 @@ ns.send_event(start='now', event_type='stm+', label='stm+')
 ns.send_event(..., wait=True)         # block and return the ECI response
 ns.flush_events(timeout=None)         # block until the queue drains
 ns.event_errors()                     # failures from asynchronous sends
+ns.eci_errors()                       # failed ECI responses (not raised)
+ns.set_strict_eci(True)               # make failed responses raise instead
 ns.getTime()                          # timestamp for right now
 ns.time_at_monotonic(monotonic_time)  # timestamp for a captured reading
 
@@ -874,7 +916,7 @@ ns.time_at_monotonic(monotonic_time)  # timestamp for a captured reading
 ns.sample_drift(samples=None, spacing=None)
 ns.sample_drift_if_due(available_pause=None)
 ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35,
-                        background=False)
+                        background=True)
 ns.set_drift_sampling(samples=4, spacing=0.05)
 
 # Drift model
