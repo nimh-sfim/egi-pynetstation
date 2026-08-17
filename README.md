@@ -595,8 +595,18 @@ package, `ntpsync()` is called by `begin_rec()` when an NTP server is
 configured.
 
 Do not repeatedly call `ntpsync()` during a recording for drift correction.
-Repeated ECI clock syncs can reset the local event timestamp epoch and create
-discontinuities in the timestamps sent to Net Station.
+Repeated ECI clock syncs reset the local event timestamp epoch and create
+discontinuities in the timestamps sent to Net Station, so a second call
+raises `NetStationLifecycleError`. Pass `force=True` only for diagnostics
+such as `example5`'s `--ntpsync-every`, where the discontinuity is the
+thing being measured.
+
+One `NetStation` object records once, for the same reason: a second
+`begin_rec()` would re-run the sync while the drift model still holds
+samples measured from the previous origin, fitting a line across two
+coordinate systems. It is refused. Call `disconnect()` and create a new
+object for the next recording — reconnecting an existing object also
+works and starts from clean drift state.
 
 `NTPReturnClock` / `sync_return_clock()` is diagnostic. On tested systems its
 timestamp response may be delayed until a following command, and follow-up ECI

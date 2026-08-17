@@ -85,10 +85,16 @@ reading you captured earlier:
 
    **Use exactly one ECI clock sync per recording.**
    :meth:`~egi_pynetstation.NetStation.NetStation.ntpsync` is called for
-   you by ``begin_rec()``. Do not call it again during a recording to
-   "keep the clock fresh" — a repeated ECI clock sync resets the local
-   event timestamp epoch and creates a discontinuity in the timestamps
-   sent to Net Station.
+   you by ``begin_rec()``. Calling it again to "keep the clock fresh"
+   resets the local event timestamp epoch and creates a discontinuity in
+   the timestamps sent to Net Station, so a second call now raises
+   ``NetStationLifecycleError``. Pass ``force=True`` only for
+   diagnostics, where re-basing the epoch is the thing being measured.
+
+   For the same reason, one ``NetStation`` object records once. A second
+   ``begin_rec()`` is refused: it would re-run the sync while the drift
+   model still holds samples measured from the previous origin. Call
+   ``disconnect()`` and build a new object for the next recording.
 
    Correcting for drift is what
    :meth:`~egi_pynetstation.NetStation.NetStation.sample_drift` is for.

@@ -22,6 +22,8 @@ Related accessors:
   from asynchronous sends.
 * :meth:`~egi_pynetstation.NetStation.NetStation.eci_errors` — ECI
   responses that failed or did not parse, recorded rather than raised.
+* :meth:`~egi_pynetstation.NetStation.NetStation.session_summary` — one
+  call covering drift, event, ECI, and NTP-sampling health.
 * :meth:`~egi_pynetstation.NetStation.NetStation.pending_events` — how
   many events are still queued.
 
@@ -113,10 +115,45 @@ Each line carries a ``record`` field:
    * - ``drift_undersampled``
      - Auto-drift was enabled but almost nothing was sampled — usually a
        missing ``sample_drift_if_due()`` call.
+   * - ``drift_sampling_failed``
+     - NTP queries have failed several bursts in a row. Written once on
+       entry to an outage, not once per interval.
+   * - ``drift_sampling_recovered``
+     - Sampling started working again. Records
+       ``failures_during_outage``.
 
 Every failure record also carries a ``clock`` snapshot: the full
 ``clock_state()`` at the moment of the error. That is usually what
 explains it.
+
+When sampling stops entirely
+----------------------------
+
+A stalled drift model and a *sampling outage* are different failures, and
+only the first is visible to ``drift_stalled``. The stall detector counts
+**rejected fits**. If every NTP query fails, no sample is recorded, so no
+fit is attempted, so nothing is rejected — ``drift_stalled`` stays
+``False`` while the applied correction silently freezes at its last
+value.
+
+``session_summary()`` covers this separately:
+
+.. code-block:: python
+
+    summary = ns.session_summary()
+    if summary['ntp_sampling_stale']:
+        print(summary['ntp_sample_failures'], 'failed bursts;',
+              summary['ntp_seconds_since_success'], 's since a good one')
+
+``ntp_sampling_stale`` becomes True when background sampling is expected
+but the last success is older than ``max(2 x interval,
+drift_max_model_age)``, and it forces ``ok`` to False. The same fields,
+plus ``ntp_consecutive_failures`` and ``ntp_last_error``, appear in
+``clock_state()``.
+
+Cooperative sampling is never judged stale: with
+``auto_drift_background=False`` the experiment owns the schedule, so the
+package cannot tell a missed sample from a deliberate one.
 
 Why the drift records matter
 ----------------------------

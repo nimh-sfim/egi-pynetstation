@@ -514,8 +514,13 @@ def main(argv=None) -> int:
             error_log=args.error_log,
         )
         connect_with_drift_options(ns, ip_clock, args)
-        ns.send_command('BeginRecording')
-        ns.ntpsync()
+        # begin_rec() rather than send_command('BeginRecording'):
+        # send_command() is the non-strict diagnostic path, so a refused
+        # or garbled response came back as a dictionary nobody inspected
+        # and this script would run a full validation session against a
+        # recording that never started. begin_rec() raises instead, and
+        # does its own ntpsync() only after the amplifier accepts.
+        ns.begin_rec()
 
         # Auto-drift is configured in connect(): background sampling by
         # default, or cooperative (this script owns the timing-safety
@@ -631,7 +636,7 @@ def main(argv=None) -> int:
             if sync_before_stimulus:
                 sync_local_time = time.time()
                 try:
-                    sync_result = repr(ns.ntpsync())
+                    sync_result = repr(ns.ntpsync(force=True))
                 except Exception as err:
                     sync_error = f'{type(err).__name__}: {err}'
 
@@ -722,7 +727,7 @@ def main(argv=None) -> int:
             if record['sync_after_stimulus']:
                 record['post_sync_local_time'] = time.time()
                 try:
-                    record['post_sync_result'] = repr(ns.ntpsync())
+                    record['post_sync_result'] = repr(ns.ntpsync(force=True))
                 except Exception as err:
                     record['post_sync_error'] = f'{type(err).__name__}: {err}'
 

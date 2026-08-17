@@ -187,6 +187,15 @@ class NetStation(object):
         self._auto_drift_stop = threading.Event()
         self._response_tokens = []
         self._recording_start = None
+        # Whether a recording epoch has already been used on this
+        # connection. begin_rec() re-runs the ECI clock sync, which
+        # re-bases the local event epoch while the drift model still holds
+        # samples measured against the previous one -- so a second epoch
+        # is refused rather than silently mixing two coordinate systems.
+        self._recording_started = False
+        # Whether the ECI clock sync that establishes the event timestamp
+        # epoch has completed. Set only after the amplifier accepts it.
+        self._ntpsynced = False
         # Background event sender. send_event() captures the timestamp on
         # the calling thread and hands the socket write to this worker, so
         # a screen-flip callback is never blocked by network I/O.
@@ -214,6 +223,20 @@ class NetStation(object):
         self._eci_errors = []
         self._eci_error_count = 0
         self._eci_errors_kept = 100
+        # NTP sampling health. A total sampling outage is otherwise
+        # invisible: no sample means no fit is attempted, so the stall
+        # detector -- which counts *rejected* fits -- never fires, and the
+        # session keeps reporting itself healthy while the applied
+        # correction silently goes stale.
+        self._ntp_failure_count = 0
+        self._ntp_consecutive_failures = 0
+        self._ntp_last_attempt_monotonic = None
+        self._ntp_last_success_monotonic = None
+        self._ntp_last_error = None
+        # Transition flag, so a long outage logs on entry and on recovery
+        # rather than once every interval.
+        self._ntp_failure_reported = False
+        self._ntp_failures_before_report = 3
 
     def check_connected(func) -> None:
         """Decorator to raise exception if not connected
@@ -375,6 +398,11 @@ class NetStation(object):
                 'inconvenience.'
             )
 
+        # A NetStation object may be reconnected after disconnect().
+        # Clearing here rather than in disconnect() means state survives
+        # for inspection after a run and is only discarded when a genuinely
+        # new session begins.
+        self._reset_session_state()
         self._socket.connect()
         self._connected = True
         self._ntp_ip = ntp_ip
@@ -435,30 +463,106 @@ class NetStation(object):
             'clock': None,
         })
         if handshake:
-            self._command('Query', self._endian)
-            self._command('Attention')
+            # Strict: if the amplifier will not complete the opening
+            # handshake there is no working session, and every later
+            # command would fail in a more confusing way.
+            self._command('Query', self._endian, strict=True)
+            self._command('Attention', strict=True)
+
+    def _reset_session_state(self) -> None:
+        """Discard everything tied to a previous connection's clock epoch.
+
+        Drift samples carry elapsed times measured from a specific sync
+        origin. Reconnecting establishes a new one, so carrying the old
+        history over would fit a line through two different coordinate
+        systems -- the failure mode that makes a second recording epoch
+        unsafe in the first place.
+        """
+        with self._clock_lock:
+            self._syncepoch = None
+            self._sync_system_time = None
+            self._sync_monotonic = None
+            self._offset = None
+            self._offset_mono = None
+            self._client_clock_start_ntp = None
+            self._server_clock_start_ntp = None
+            self._clock_start_history = []
+            self._drift_history = []
+            self._drift_model = None
+            self._drift_model_dirty = True
+            self._drift_active_model = None
+            self._drift_last_reject_reason = None
+            self._drift_rejected_fits = 0
+            self._drift_accepted_fits = 0
+            self._drift_consecutive_rejections = 0
+            self._drift_stalled = False
+            self._drift_stall_started_elapsed = None
+            self._auto_drift_last_monotonic = None
+            self._pending_log_records = []
+            self._recording_start = None
+            self._recording_started = False
+            self._ntpsynced = False
+            self._event_errors = []
+            self._eci_errors = []
+            self._eci_error_count = 0
+            self._ntp_failure_count = 0
+            self._ntp_consecutive_failures = 0
+            self._ntp_last_attempt_monotonic = None
+            self._ntp_last_success_monotonic = None
+            self._ntp_last_error = None
+            self._ntp_failure_reported = False
+        # Half-read responses from the previous socket must not be
+        # attributed to commands sent on the new one.
+        with self._io_lock:
+            self._response_tokens = []
 
     @check_connected
-    def ntpsync(self):
+    def ntpsync(self, force: bool = False):
         """Perform the ECI NTP synchronization.
 
         This sends one ECI ``NTPClockSync`` command using the current offset
         reported by the amplifier/Net Station NTP server. It also stores the
         first NTP offset sample used by the client-side drift corrector.
         Repeated ECI clock syncs during a recording can reset the local event
-        timestamp epoch and should be avoided for normal experiments.
+        timestamp epoch and should be avoided for normal experiments, so a
+        second call is refused unless ``force=True``.
+
+        Parameters
+        ----------
+        force : bool
+            Re-run the sync even though one has already completed. This
+            re-bases the event timestamp epoch mid-recording and
+            invalidates the elapsed-time coordinates every existing drift
+            sample was measured against. Diagnostic use only.
+
+        Raises
+        ------
+        NetStationLifecycleError
+            If the sync has already completed and ``force`` is False.
         """
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
+        if self._ntpsynced and not force:
+            raise NetStationLifecycleError(
+                'The ECI clock sync has already been performed. Repeating '
+                'it re-bases the event timestamp epoch, so every drift '
+                'sample already collected would be measured against a '
+                'different origin. begin_rec() performs the one sync an '
+                'experiment needs. Pass force=True only for diagnostics.'
+            )
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
         t = time.time()
         monotonic_t = time.monotonic()
         ntp_t = system_to_ntp_time(t + response.offset)
         with self._io_lock:
+            # Strict, and _ntpsynced is set only after the amplifier
+            # accepts. This establishes the event timestamp epoch for the
+            # whole recording; a silently failed sync would put every
+            # marker in the file at the wrong time.
+            self._command('Attention', strict=True)
+            cresponse = self._command('NTPClockSync', ntp_t, strict=True)
             self._ntpsynced = True
-            self._command('Attention')
-            cresponse = self._command('NTPClockSync', ntp_t)
         with self._clock_lock:
             # _offset stays in the system-clock frame for ECI/NTP timecode
             # use. _offset_mono is the monotonic-frame reference the drift
@@ -674,15 +778,50 @@ class NetStation(object):
 
     @check_connected
     def begin_rec(self) -> None:
-        """Begin recording and perform the initial ECI NTP sync."""
-        with self._io_lock:
-            if self._ntp_ip:
-                self._command('BeginRecording')
-                self._recording_start = time.time()
-                self.ntpsync()
-                return
+        """Begin recording and perform the initial ECI NTP sync.
 
+        Raises
+        ------
+        NetStationNoNTPIP
+            If no NTP server address was given to :meth:`connect`.
+        ECIResponseFailure
+            If Net Station refuses or garbles the ``BeginRecording``
+            command. Nothing local is changed in that case: there is no
+            recording start time and no clock sync, so the failure cannot
+            be mistaken for a working session.
+
+        Notes
+        -----
+        Recording control is always strict, regardless of ``strict_eci``.
+        That setting governs *event* responses, where dropping one marker
+        is better than ending a run. This is the opposite situation: a
+        rejected BeginRecording means there is no recording at all, and
+        continuing produces the worst possible outcome -- a complete
+        behavioural session with local logs but no EEG.
+        """
+        if not self._ntp_ip:
             raise NetStationNoNTPIP()
+        if self._recording_started:
+            raise NetStationLifecycleError(
+                'This connection has already recorded. A second '
+                'begin_rec() would re-run the ECI clock sync and re-base '
+                'the event timestamp epoch, while the drift model still '
+                'holds samples measured against the first one. Call '
+                'disconnect() and create a new NetStation for the next '
+                'recording.'
+            )
+        with self._io_lock:
+            self._command('BeginRecording', strict=True)
+            self._recording_started = True
+            # Only now is there really a recording to timestamp against.
+            self._recording_start = time.time()
+            try:
+                self.ntpsync(force=True)
+            except Exception:
+                # Recording did start, but the epoch is unusable. Say so
+                # rather than leaving a half-initialised clock behind.
+                self._recording_start = None
+                raise
 
     @check_connected
     def end_rec(self) -> None:
@@ -693,7 +832,10 @@ class NetStation(object):
         """
         self.flush_events()
         with self._io_lock:
-            self._command('EndRecording')
+            # Strict for the same reason as begin_rec(): if Net Station
+            # did not accept the stop, the operator needs to know before
+            # they walk away from the amplifier.
+            self._command('EndRecording', strict=True)
             self._recording_start = None
 
     @check_connected
@@ -1507,6 +1649,105 @@ class NetStation(object):
             )
         return best, burst
 
+    def _note_ntp_sample_failure(self, err: Exception) -> None:
+        """Record a burst in which every NTP query failed."""
+        with self._clock_lock:
+            now = time.monotonic()
+            self._ntp_failure_count += 1
+            self._ntp_consecutive_failures += 1
+            self._ntp_last_attempt_monotonic = now
+            self._ntp_last_error = f'{type(err).__name__}: {err}'
+            consecutive = self._ntp_consecutive_failures
+            # Log on entry to an outage, not once per interval: a long
+            # outage would otherwise write a record every 15 seconds.
+            report = (
+                not self._ntp_failure_reported
+                and consecutive >= self._ntp_failures_before_report
+            )
+            if report:
+                self._ntp_failure_reported = True
+                context = self._drift_transition_context()
+                context.update(
+                    record='drift_sampling_failed',
+                    consecutive_failures=consecutive,
+                    total_failures=self._ntp_failure_count,
+                    error=self._ntp_last_error,
+                    clock=None,
+                )
+        if report:
+            logger.warning(
+                'NTP drift sampling has failed %d times in a row (%s). '
+                'No new samples means no new fits, so the applied '
+                'correction is frozen at its last value and timing error '
+                'will grow.',
+                consecutive, self._ntp_last_error,
+            )
+            self._queue_log_record(context)
+
+    def _note_ntp_sample_success(self) -> None:
+        """Record a burst that produced a usable reply."""
+        with self._clock_lock:
+            now = time.monotonic()
+            self._ntp_last_attempt_monotonic = now
+            self._ntp_last_success_monotonic = now
+            failures = self._ntp_consecutive_failures
+            self._ntp_consecutive_failures = 0
+            recovered = self._ntp_failure_reported
+            if recovered:
+                self._ntp_failure_reported = False
+                context = self._drift_transition_context()
+                context.update(
+                    record='drift_sampling_recovered',
+                    failures_during_outage=failures,
+                    clock=None,
+                )
+        if recovered:
+            logger.info(
+                'NTP drift sampling recovered after %d failed bursts.',
+                failures,
+            )
+            self._queue_log_record(context)
+
+    def _ntp_sampling_health(self) -> dict:
+        """Whether drift samples are still actually arriving.
+
+        Separate from the stall detector, which counts *rejected* fits: a
+        total sampling outage produces no fits at all, so it is silent to
+        every other health signal in the package.
+        """
+        with self._clock_lock:
+            expected = self._auto_drift_enabled and self._auto_drift_background
+            last_success = self._ntp_last_success_monotonic
+            interval = self._auto_drift_interval
+            max_age = self._drift_max_model_age
+            failures = self._ntp_failure_count
+            consecutive = self._ntp_consecutive_failures
+            last_error = self._ntp_last_error
+            synced = self._syncepoch is not None
+        age = (
+            None if last_success is None
+            else time.monotonic() - last_success
+        )
+        # Generous: two intervals covers an ordinary hiccup, and there is
+        # no point complaining sooner than extrapolation is bounded at.
+        threshold = max(2.0 * interval, max_age) if max_age else 2.0 * interval
+        if not (expected and synced):
+            stale = False
+        elif last_success is None:
+            # Sampling was expected but nothing has ever succeeded.
+            stale = failures > 0
+        else:
+            stale = age > threshold
+        return {
+            'ntp_sampling_expected': expected,
+            'ntp_sample_failures': failures,
+            'ntp_consecutive_failures': consecutive,
+            'ntp_seconds_since_success': age,
+            'ntp_sampling_stale': stale,
+            'ntp_staleness_threshold': threshold,
+            'ntp_last_error': last_error,
+        }
+
     @check_connected
     def sample_drift(
         self,
@@ -1544,7 +1785,16 @@ class NetStation(object):
         if spacing is None:
             spacing = self._drift_sample_spacing
         # The network round trips happen outside every lock.
-        response, burst = self._query_ntp_best_of(samples, spacing)
+        try:
+            response, burst = self._query_ntp_best_of(samples, spacing)
+        except Exception as err:
+            # A burst where every query failed produces no sample, so no
+            # fit is attempted and the stall detector never sees anything.
+            # Record it explicitly instead.
+            self._note_ntp_sample_failure(err)
+            self._flush_pending_log_records()
+            raise
+        self._note_ntp_sample_success()
         with self._clock_lock:
             self._auto_drift_last_monotonic = time.monotonic()
             sample = self._record_ntp_drift_sample(
@@ -1615,12 +1865,16 @@ class NetStation(object):
         errors = self.event_errors()
         with self._clock_lock:
             eci_failures = self._eci_error_count
+        health = self._ntp_sampling_health()
         engaged = bool(state.get('drift_accepted_fits'))
         stalled = bool(state.get('drift_stalled'))
         slope = state.get('active_drift_slope')
         return {
             'ok': (
                 engaged and not stalled and not errors and not eci_failures
+                # A sampling outage produces no rejected fits, so `stalled`
+                # stays False while the correction quietly goes stale.
+                and not health['ntp_sampling_stale']
             ),
             'drift_engaged': engaged,
             'drift_stalled': stalled,
@@ -1632,13 +1886,18 @@ class NetStation(object):
             ),
             'event_send_failures': len(errors),
             'eci_response_failures': eci_failures,
+            'ntp_sampling_stale': health['ntp_sampling_stale'],
+            'ntp_sample_failures': health['ntp_sample_failures'],
+            'ntp_seconds_since_success': health['ntp_seconds_since_success'],
         }
 
     def clock_state(self) -> dict:
         """Return current client/server clock synchronization state."""
+        health = self._ntp_sampling_health()
         with self._clock_lock:
             drift = self.drift_estimate()
             return {
+                **health,
                 'client_clock_start_ntp': self._client_clock_start_ntp,
                 'server_clock_start_ntp': self._server_clock_start_ntp,
                 'syncepoch': self._syncepoch,

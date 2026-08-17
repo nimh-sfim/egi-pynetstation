@@ -53,8 +53,9 @@ Three things are worth knowing before you write anything else:
 2. **Send events from the flip callback.**
    :meth:`~egi_pynetstation.NetStation.NetStation.send_event` never
    blocks, so it is safe there. See :doc:`psychopy`.
-3. **Do not re-sync the ECI clock during a recording.** One sync at
-   ``begin_rec()`` is correct; repeated syncs reset the timestamp epoch.
+3. **Do not re-sync the ECI clock during a recording.** One sync included in
+   ``begin_rec()`` is correct; repeated syncs reset the timestamp epoch and
+   are refused unless ``force=True`` is passed for diagnostics.
 
 Indices and tables
 ==================

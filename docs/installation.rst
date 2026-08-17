@@ -17,31 +17,13 @@ From GitHub
     cd egi-pynetstation
     pip install .
 
-Use ``pip install -e .`` for an editable install while developing.
-
-.. warning::
-
-   If you have previously installed the PyPI release into the same
-   environment, uninstall it before using an editable checkout. The
-   site-packages copy can shadow your working tree depending on the
-   current directory, so you may silently run the wrong code.
-
-   .. code-block:: bash
-
-       pip uninstall -y egi-pynetstation
-
-   To confirm which copy is actually loaded:
-
-   .. code-block:: bash
-
-       python -c "import importlib; print(importlib.import_module('egi_pynetstation.NetStation').__file__)"
 
 With PsychoPy
 -------------
 
-We are happy to have partnered with `PsychoPy <https://psychopy.org>`_,
-which includes ``egi-pynetstation`` in the standalone package without any
-further downloads or steps.
+You can install directly into `PsychoPy <https://psychopy.org>`_,
+in the standalone package without any further downloads or steps.
+We are preparing a plugin to make PsychoPy builder setups easier.
 
 .. _check-your-clocks:
 

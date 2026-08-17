@@ -591,7 +591,7 @@ def main() -> None:
         'a': ('Attention', send('Attention')),
         't': ('ClockSync', lambda: send('ClockSync', clock_sync_data())()),
         'n': ('raw NTPClockSync', lambda: send('NTPClockSync', ntp_now())()),
-        'i': ('high-level ntpsync', lambda: ns.ntpsync()
+        'i': ('high-level ntpsync', lambda: ns.ntpsync(force=True)
               if ensure_connected() else None),
         's': ('sync return clock', lambda: ns.sync_return_clock()
               if ensure_connected() else None),
@@ -635,7 +635,7 @@ def main() -> None:
                                  lambda: send('NTPClockSync',
                                               client_clock_start())()),
         'ntpsync': ('high-level ntpsync',
-                    lambda: ns.ntpsync() if ensure_connected() else None),
+                    lambda: ns.ntpsync(force=True) if ensure_connected() else None),
         'sync_return_clock': ('sync return clock',
                               lambda: ns.sync_return_clock()
                               if ensure_connected() else None),
