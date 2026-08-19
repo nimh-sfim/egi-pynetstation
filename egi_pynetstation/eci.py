@@ -155,6 +155,11 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
                 return True
             else:
                 raise InvalidECIResponse(bytearr)
+        elif arrlength == 3 and bytearr[0:1] == b'F':
+            # Documented failure form: 'F' plus two status bytes. These
+            # used to be left in the stream and misread as the next
+            # command's response.
+            raise ECIFailure(bytearr[1:])
         elif arrlength == 2:
             # Identify version number
             # NOTE: this deviates from the SDK documentation, which
@@ -198,6 +203,87 @@ def parse_response(bytearr: bytes) -> Union[bool, float, int]:
             raise InvalidECIResponse(bytearr)
     else:
         raise InvalidECIResponse(bytearr)
+
+
+# What shape of response each command produces. ECI has no length
+# prefix, so the only reliable way to know where one response ends is to
+# know which command is outstanding.
+RESPONSE_STATUS = 'status'          # Z / R / \x01 / S, or F(+2 status)
+RESPONSE_IDENTIFY = 'identify'      # I, or I + version byte
+RESPONSE_NTP = 'ntp'                # 8- or 9-byte timestamp
+
+RESPONSE_SHAPES = {
+    'Query': RESPONSE_IDENTIFY,
+    'NTPReturnClock': RESPONSE_NTP,
+}
+
+# Single-byte responses that stand alone.
+_STATUS_SINGLETONS = (b'Z', b'R', b'\x01', b'S')
+
+
+def response_shape(cmd: str) -> str:
+    """The response shape expected for a command."""
+    return RESPONSE_SHAPES.get(cmd, RESPONSE_STATUS)
+
+
+def frame_response(bytearr: bytes, expect: str, final: bool = False):
+    """Carve exactly one complete ECI response off the front of a buffer.
+
+    Returns ``(token, consumed)``, or ``(None, 0)`` when more bytes are
+    needed. TCP gives no guarantee that one server ``send()`` arrives as
+    one client ``recv()``, so a reader has to be able to say "not yet"
+    and come back with more.
+
+    ``final`` means no further bytes are coming (the read timed out).
+    Two response forms are genuinely ambiguous until then -- ``F`` alone
+    versus ``F`` plus two status bytes, and the 8- versus 9-byte
+    timestamp -- so those resolve to the shorter form only once nothing
+    else arrives.
+
+    Parameters
+    ----------
+    bytearr: the bytes received so far
+    expect: one of RESPONSE_STATUS, RESPONSE_IDENTIFY, RESPONSE_NTP
+    final: treat the buffer as complete rather than waiting for more
+    """
+    if not isinstance(bytearr, bytes):
+        raise InvalidECIResponse(bytearr)
+    if not bytearr:
+        return (None, 0)
+
+    first = bytearr[0:1]
+
+    # Failure can answer any command, and the documented form carries two
+    # status bytes. Leaving those in the stream is what used to poison the
+    # *next* command's response.
+    if first == b'F':
+        if len(bytearr) >= 3:
+            return (bytearr[:3], 3)
+        return (bytearr[:1], 1) if final else (None, 0)
+
+    if expect == RESPONSE_NTP:
+        if len(bytearr) >= 9:
+            # A leading S, or a trailing Z, marks the 9-byte form.
+            if first == b'S' or bytearr[8:9] == b'Z':
+                return (bytearr[:9], 9)
+            return (bytearr[:8], 8)
+        if len(bytearr) >= 8:
+            # Could still be a 9-byte form whose last byte is in flight.
+            return (bytearr[:8], 8) if final else (None, 0)
+        return (None, 0)
+
+    if expect == RESPONSE_IDENTIFY:
+        if first == b'I':
+            if len(bytearr) >= 2:
+                return (bytearr[:2], 2)
+            return (bytearr[:1], 1) if final else (None, 0)
+        return (bytearr[:1], 1)
+
+    if first in _STATUS_SINGLETONS:
+        return (bytearr[:1], 1)
+    # Unrecognised: hand one byte to parse_response so it raises with the
+    # real bytes rather than this function inventing a diagnosis.
+    return (bytearr[:1], 1)
 
 
 def split_response_tokens(bytearr: bytes) -> list:
@@ -256,6 +342,38 @@ def split_response_tokens(bytearr: bytes) -> list:
     return tokens
 
 
+# Every field in an ECI event packet is fixed-width. Out-of-range input
+# used to reach struct.pack() and die with an opaque struct.error naming
+# neither the field nor the value, so these bounds are checked up front.
+MAX_LABEL_CHARS = 255           # pack('B', ...)
+MAX_DESC_CHARS = 255            # pack('B', ...)
+MAX_DATA_KEYS = 255             # pack('B', ...)
+MAX_KEY_DATA_BYTES = 65535      # pack('H', ...)
+MAX_EVENT_BYTES = 65535         # pack('H', ...)
+MIN_START_MILLIS = -2 ** 31     # pack('i', ...)
+MAX_START_MILLIS = 2 ** 31 - 1
+MAX_DURATION_MILLIS = 2 ** 32 - 1   # pack('I', ...)
+MIN_LONG_VALUE = -2 ** 31       # pack('i', ...)
+MAX_LONG_VALUE = 2 ** 31 - 1
+
+
+def _ascii_bytes(value: str, field: str) -> bytes:
+    """Encode a field as ASCII, naming it if that is not possible.
+
+    ECI is an ASCII protocol. Without this the failure was a bare
+    UnicodeEncodeError raised from inside packing, which said nothing
+    about which field carried the offending character.
+    """
+    try:
+        return value.encode('ascii')
+    except UnicodeEncodeError as err:
+        offender = value[err.start:err.end]
+        raise TypeError(
+            f'Event {field} must be ASCII; {offender!r} at position '
+            f'{err.start} is not'
+        ) from err
+
+
 def package_event(
     start: float,
     duration: float,
@@ -276,6 +394,16 @@ def package_event(
     desc: a <=255-character string for describing the event
     data: a dictionary where each value is a string, number, or boolean,
         and each key is a string. Use this to pass data.
+
+    Notes
+    -----
+    Every field is fixed-width, so all of these are bounded: at most
+    ``MAX_DATA_KEYS`` keys, ``MAX_KEY_DATA_BYTES`` per text value, and
+    ``MAX_EVENT_BYTES`` for the whole packet; ``start`` and integer
+    values are signed 32-bit, ``duration`` unsigned 32-bit. Everything
+    must be ASCII-encodable. Violations raise ``TypeError`` naming the
+    field and the limit, which is the convention this function already
+    uses for its range checks.
     """
     # First, perform type-checking and top-level validation
     type_start = type(start)
@@ -312,29 +440,46 @@ def package_event(
     # Bound is 255, not 256: the length is packed with pack('B', ...),
     # an unsigned char. A 256-character label used to clear this check
     # and then die with an opaque struct.error during packing.
-    if not len_label <= 255:
+    if not len_label <= MAX_LABEL_CHARS:
         raise TypeError(
-            f'Event label should be <= 255 characters, is {len_label}'
+            f'Event label should be <= {MAX_LABEL_CHARS} characters, '
+            f'is {len_label}'
         )
     if not isinstance(desc, str):
         raise TypeError(
             f'Event description should be str, is {type_desc}'
         )
     len_desc = len(desc)
-    if not len_desc <= 255:
+    if not len_desc <= MAX_DESC_CHARS:
         raise TypeError(
-            'Event description should be <= 255 characters, is ' +
-            f'{len_desc}'
+            f'Event description should be <= {MAX_DESC_CHARS} characters, '
+            f'is {len_desc}'
         )
     if not isinstance(data, dict):
         raise TypeError(f'Event data should be dict, is {type_data}')
 
     # Begin creating the data block
     nkeys = len(data.keys())
+    if not nkeys <= MAX_DATA_KEYS:
+        raise TypeError(
+            f'Event data should have <= {MAX_DATA_KEYS} keys, has {nkeys}'
+        )
 
     # Build block for datagram header
     start_millis = int(start * MPS)
     duration_millis = int(duration * MPS)
+    if not MIN_START_MILLIS <= start_millis <= MAX_START_MILLIS:
+        raise TypeError(
+            f'Event start of {start} s is {start_millis} ms, outside the '
+            f'signed 32-bit field ECI uses '
+            f'({MIN_START_MILLIS} to {MAX_START_MILLIS} ms)'
+        )
+    if not 0 <= duration_millis <= MAX_DURATION_MILLIS:
+        raise TypeError(
+            f'Event duration of {duration} s is {duration_millis} ms, '
+            f'outside the unsigned 32-bit field ECI uses '
+            f'(0 to {MAX_DURATION_MILLIS} ms)'
+        )
     # TODO: turn into a debug option
     # print(
     #     f'Using start time of {start_millis} milliseconds'
@@ -343,9 +488,9 @@ def package_event(
     block = (
         pack('i', start_millis) +
         pack('I', duration_millis) +
-        bytes(event_type, 'ascii') +
-        pack('B', len_label) + bytes(label, 'ascii') +
-        pack('B', len_desc) + bytes(desc, 'ascii') +
+        _ascii_bytes(event_type, 'type') +
+        pack('B', len_label) + _ascii_bytes(label, 'label') +
+        pack('B', len_desc) + _ascii_bytes(desc, 'description') +
         pack('B', nkeys)
     )
 
@@ -375,13 +520,25 @@ def package_event(
             klen = 8
             kdata = pack('d', value)
         elif isinstance(value, int):
+            if not MIN_LONG_VALUE <= value <= MAX_LONG_VALUE:
+                raise TypeError(
+                    f'Event data key {key} has integer value {value}, '
+                    f'outside the signed 32-bit field ECI uses '
+                    f'({MIN_LONG_VALUE} to {MAX_LONG_VALUE})'
+                )
             ktype = 'long'
             klen = 4
             kdata = pack('i', value)
         elif isinstance(value, str):
             ktype = 'TEXT'
-            klen = len(value)
-            kdata = bytes(value, 'ascii')
+            kdata = _ascii_bytes(value, f'data key {key}')
+            klen = len(kdata)
+            if not klen <= MAX_KEY_DATA_BYTES:
+                raise TypeError(
+                    f'Event data key {key} has a {klen}-byte value; the '
+                    f'ECI length field holds at most '
+                    f'{MAX_KEY_DATA_BYTES} bytes'
+                )
         else:
             type_value = type(value)
             raise TypeError(
@@ -391,7 +548,7 @@ def package_event(
 
         # Build the key's block
         key_block += (
-            bytes(key, 'ascii') +
+            _ascii_bytes(key, 'data key') +
             bytes(ktype, 'ascii') +
             pack('H', klen) +
             kdata
@@ -399,6 +556,12 @@ def package_event(
 
     # Put all blocks together
     len_all_blocks = len(block) + len(key_block)
+    if not len_all_blocks <= MAX_EVENT_BYTES:
+        raise TypeError(
+            f'Event packs to {len_all_blocks} bytes; the ECI length field '
+            f'holds at most {MAX_EVENT_BYTES}. Shorten the label, '
+            f'description, or data values'
+        )
 
     datagram = pack('H', len_all_blocks) + block + key_block
 

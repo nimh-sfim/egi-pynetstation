@@ -13,11 +13,19 @@ provide ~15.6 ms instead, which silently degrades the correction.
 
 ``--compare`` is the Windows diagnostic. On pre-3.13 Python, time.time()
 and time.monotonic() are updated on the system timer tick, so their
-resolution depends on whether something has raised the global timer
-resolution with timeBeginPeriod(). This mode measures the clocks as they
-are, then after importing PsychoPy, then after raising the timer
-resolution here -- so you can see exactly which of those is responsible
-for what.
+resolution depends on whether the timer resolution has been raised with
+timeBeginPeriod(). This mode measures the clocks as they are, then after
+importing PsychoPy, then after raising the timer resolution here -- so
+you can see exactly which of those is responsible for what.
+
+Note that timeBeginPeriod() is *not* system-wide on current Windows.
+Since Windows 10 version 2004 the request is scoped to the calling
+process, and on Windows 11 a process whose window is minimised or
+occluded may silently lose the resolution it asked for. So call it from
+your own experiment process rather than assuming something else has, and
+trust the measured time.time()/time.monotonic() numbers below over the
+nominal timer setting -- what matters is the resolution your process
+actually gets while the experiment is in the foreground.
 """
 
 import argparse
@@ -67,8 +75,14 @@ def windows_timer_resolution():
 
     Returns (coarsest, finest, current) in milliseconds, or None off
     Windows. This is a direct reading rather than an inference from clock
-    behaviour, so it is the authoritative answer to "has anything called
-    timeBeginPeriod?".
+    behaviour, so it answers "what timer resolution is in force right
+    now?".
+
+    Read it as a symptom, not a verdict. Since Windows 10 version 2004
+    timeBeginPeriod() is process-scoped, so this reports what applies to
+    *this* process at *this* moment, and a minimised or occluded window
+    can lose the raised resolution on Windows 11. The measured clock
+    resolutions are the thing to trust.
     """
     if not WINDOWS:
         return None

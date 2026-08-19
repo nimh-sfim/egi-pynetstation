@@ -3,6 +3,8 @@ channels:
     - conda-forge
     - defaults
 dependencies:
-    - ntplib
-    - python=3.7
+    # Keep in step with pyproject.toml's floor and the CI matrix.
+    # 3.13+ is recommended on Windows; see docs/installation.rst.
+    - python>=3.9
+    - ntplib>=0.4.0
     - pytest

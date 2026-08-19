@@ -220,6 +220,70 @@ session rather than a live recording — opt into raising:
 That applies uniformly to unparseable responses and to failures the
 amplifier reports.
 
+.. _eci-byte-order:
+
+Checking the ECI byte-order setting
+-----------------------------------
+
+``NetStation(..., endian=...)`` selects the four-character byte-order
+token sent in the legacy ECI ``Qcccc`` handshake.  The token tells Net
+Station how to interpret multibyte values packed in the stimulus
+computer's native byte order.  It is not a current CPU or operating-system
+name, despite the historical names defined by the protocol.
+
+The supported tokens are:
+
+.. list-table:: Legacy ECI byte-order tokens
+   :header-rows: 1
+   :widths: 15 20 65
+
+   * - Token
+     - Byte order
+     - Appropriate systems
+   * - ``NTEL``
+     - Little-endian
+     - All current Macs, including both Intel and Apple silicon; Intel and
+       AMD PCs; and most current ARM64 systems.
+   * - ``MAC-``
+     - Big-endian
+     - Legacy PowerPC-era Macs.  Do not select this merely because the
+       stimulus computer is a Mac.
+   * - ``UNIX``
+     - Big-endian
+     - Legacy big-endian Unix systems.  The name is misleading for most
+       current Unix and Linux computers, which are little-endian.
+
+The default, ``NTEL``, is therefore correct on both Intel and Apple
+silicon Macs.  Apple confirms that both architectures use little-endian
+data in `its Apple silicon porting guidance
+<https://developer.apple.com/documentation/Apple-Silicon/porting-your-macos-apps-to-apple-silicon>`_.
+
+You can verify the byte order reported by the Python interpreter that will
+run the experiment:
+
+.. code-block:: python
+
+   import sys
+   print(sys.byteorder)  # "little" on every current Mac
+
+For a little-endian interpreter, use ``NTEL`` or leave the argument at its
+default.  Passing ``MAC-`` or ``UNIX`` from a little-endian machine makes
+the handshake disagree with the bytes the package sends and can corrupt
+multibyte event fields.
+
+.. warning::
+
+   Big-endian hosts are represented by ``MAC-`` and ``UNIX`` in the ECI
+   protocol, but this package's big-endian path has not been tested.  These
+   values are retained for protocol compatibility rather than as a claim
+   of verified support on current hardware.
+
+The ECI specification also defines a newer ``Y`` query, but its documented
+machine-type list predates Apple silicon and contains no ARM64 identifier.
+This package uses the legacy ``Qcccc`` form during connection for
+compatibility, so ``NTEL`` remains the correct token for an Apple silicon
+Mac: its meaning here is little-endian, not “made by Intel.”
+
 Interactive ECI console
 -----------------------
 

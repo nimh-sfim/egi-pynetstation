@@ -10,8 +10,6 @@ import importlib
 import time
 import types
 
-import pytest
-
 
 netstation_module = importlib.import_module('egi_pynetstation.NetStation')
 NetStation = netstation_module.NetStation

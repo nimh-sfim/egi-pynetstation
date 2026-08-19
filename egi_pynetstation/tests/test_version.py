@@ -63,3 +63,50 @@ def test_setup_py_python_requires_matches_pyproject():
     pyproject = read_declared('pyproject.toml', r'^python = "\^([\d.]+)"')
     setup_py = read_declared('setup.py', r"python_requires='>=([\d.]+)'")
     assert setup_py == pyproject
+
+
+# --- the declared Python floor -------------------------------------------
+
+"""These drifted the same way the version numbers once did.
+
+pyproject.toml declared ^3.8 while CI tested only 3.10, and eci_env.yml
+asked for 3.7 -- below even the declared minimum. Nothing caught it,
+because nothing compared them.
+"""
+
+MIN_PYTHON = '3.9'
+
+
+def test_pyproject_declares_the_supported_floor():
+    declared = read_declared('pyproject.toml', r'^python = "\^([\d.]+)"')
+    assert declared == MIN_PYTHON
+
+
+def test_setup_py_declares_the_same_floor():
+    declared = read_declared('setup.py', r"python_requires='>=([\d.]+)'")
+    assert declared == MIN_PYTHON
+
+
+def test_conda_env_is_not_below_the_floor():
+    declared = read_declared('eci_env.yml', r'- python>=([\d.]+)')
+    assert declared == MIN_PYTHON
+
+
+def test_ci_matrix_covers_the_floor():
+    """A declared minimum nobody tests is a guess, not a guarantee."""
+    workflow = (ROOT / '.github/workflows/python-app.yml').read_text()
+    versions = re.findall(r'"(\d+\.\d+)"', workflow)
+    assert MIN_PYTHON in versions, f'{MIN_PYTHON} is declared but untested'
+
+
+def test_ci_lints_a_directory_that_exists():
+    """The old command targeted `eci`, which has never existed here."""
+    workflow = (ROOT / '.github/workflows/python-app.yml').read_text()
+    assert 'flake8 egi_pynetstation' in workflow
+    # A check that cannot fail is not a check. Comments may mention the
+    # flag; what matters is that no command actually passes it.
+    commands = [
+        line for line in workflow.splitlines()
+        if not line.lstrip().startswith('#')
+    ]
+    assert not any('--exit-zero' in line for line in commands)

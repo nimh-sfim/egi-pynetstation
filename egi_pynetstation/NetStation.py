@@ -9,6 +9,7 @@ import functools
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 import warnings
@@ -18,7 +19,8 @@ from typing import Union
 from ntplib import system_to_ntp_time, NTPClient
 
 from .eci import (
-    build_command, parse_response, split_response_tokens, allowed_endians,
+    build_command, parse_response, frame_response, response_shape,
+    allowed_endians,
     package_event,
 )
 from .socket_wrapper import Socket
@@ -81,10 +83,11 @@ class NetStation(object):
       representation of the identity, for a total of two bytes rather
       than one
 
-    The default endianness is determined based on the use of a 2020
-    MacBook Pro 13" with i5, on MacOS 10.15.7. Feel free to inform the
-    authors of the appropriate endianness for other platforms so that
-    we can add that to the documentation!
+    ``endian`` is the legacy ECI ``Qcccc`` byte-order token, not a modern
+    CPU or operating-system name. ``NTEL`` means little-endian and is the
+    correct default for both Intel and Apple silicon Macs. ``MAC-`` and
+    ``UNIX`` are the protocol's historical big-endian tokens; big-endian
+    operation has not been tested by this package.
     """
     def __init__(
         self,
@@ -103,7 +106,10 @@ class NetStation(object):
         port : int
             The port number to use for the amplifier.
         endian : str
-            The endianness of the machine; see ``eci.allowed_endians``.
+            Legacy ECI byte-order token. ``NTEL`` means little-endian and
+            is correct for all current Macs. ``MAC-`` and ``UNIX`` mean
+            big-endian and are retained for protocol compatibility; see
+            ``eci.allowed_endians``.
         debug : bool
             Print ECI command and response bytes when True.
         error_log : str, optional
@@ -185,7 +191,11 @@ class NetStation(object):
         self._auto_drift_background = True
         self._auto_drift_thread = None
         self._auto_drift_stop = threading.Event()
-        self._response_tokens = []
+        # Bytes received but not yet consumed by a response. ECI has no
+        # length prefix, so a response split across two recv() calls can
+        # only be reassembled by keeping the remainder here. Guarded by
+        # _io_lock, like everything else touching the socket.
+        self._rx_buffer = b''
         self._recording_start = None
         # Whether a recording epoch has already been used on this
         # connection. begin_rec() re-runs the ECI clock sync, which
@@ -405,6 +415,54 @@ class NetStation(object):
         self._reset_session_state()
         self._socket.connect()
         self._connected = True
+        try:
+            self._configure_and_handshake(
+                ntp_ip, handshake, drift_correction, strict_eci,
+                drift_min_samples, drift_min_span, drift_max_delay,
+                drift_max_residual, drift_window_minutes, drift_samples,
+                drift_sample_spacing, drift_slew, drift_max_model_age,
+                auto_drift, auto_drift_interval, auto_drift_min_pause,
+                auto_drift_background,
+            )
+        except Exception:
+            # Setup is all-or-nothing. A rejected handshake or a bad drift
+            # argument used to leave an open socket, a live sampler
+            # thread, and _connected set, so the object looked usable and
+            # the next call failed somewhere less obvious.
+            self._abort_connect()
+            raise
+
+    def _abort_connect(self) -> None:
+        """Undo a partially completed connect()."""
+        try:
+            self._stop_auto_drift_thread()
+            self._stop_event_sender()
+        except Exception as err:
+            logger.error(
+                'While cleaning up a failed connect(): %s: %s',
+                type(err).__name__, err,
+            )
+        try:
+            self._socket.disconnect()
+        except Exception as err:
+            logger.error(
+                'While closing the socket after a failed connect(): '
+                '%s: %s', type(err).__name__, err,
+            )
+        self._connected = False
+        self._ntp_ip = None
+        self._reset_session_state()
+
+    def _configure_and_handshake(
+        self,
+        ntp_ip, handshake, drift_correction, strict_eci,
+        drift_min_samples, drift_min_span, drift_max_delay,
+        drift_max_residual, drift_window_minutes, drift_samples,
+        drift_sample_spacing, drift_slew, drift_max_model_age,
+        auto_drift, auto_drift_interval, auto_drift_min_pause,
+        auto_drift_background,
+    ) -> None:
+        """The part of connect() that must succeed as a unit."""
         self._ntp_ip = ntp_ip
         self._drift_correction = drift_correction
         if strict_eci is not None:
@@ -511,10 +569,10 @@ class NetStation(object):
             self._ntp_last_success_monotonic = None
             self._ntp_last_error = None
             self._ntp_failure_reported = False
-        # Half-read responses from the previous socket must not be
-        # attributed to commands sent on the new one.
+        # Half-read bytes from the previous socket must not be attributed
+        # to commands sent on the new one.
         with self._io_lock:
-            self._response_tokens = []
+            self._rx_buffer = b''
 
     @check_connected
     def ntpsync(self, force: bool = False):
@@ -696,8 +754,7 @@ class NetStation(object):
                     return event_response
                 last_response = event_response
             return last_response
-    
-    
+
     @check_connected
     def getTime(self):
         """Return the current event timestamp in seconds.
@@ -752,8 +809,7 @@ class NetStation(object):
             if initial_offset is None or predicted_offset is None:
                 return elapsed
             return elapsed + (predicted_offset - initial_offset)
-    
-    
+
     @check_connected
     def disconnect(self) -> None:
         """Close the TCP/IP connection.
@@ -2610,15 +2666,43 @@ class NetStation(object):
         )
         self._write_error_log(cmd, bytearr, err, context)
 
-    def _read_response_token(self) -> bytes:
-        if not self._response_tokens:
-            response = self._socket.read()
-            tokens = split_response_tokens(response)
-            self._debug_rx_read(response, tokens)
-            self._response_tokens.extend(tokens)
-        if self._response_tokens:
-            return self._response_tokens.pop(0)
-        return b''
+    def _read_response_token(self, expect: str = 'status') -> bytes:
+        """Return the bytes of exactly one complete response.
+
+        Reads until the expected response is whole, consumes precisely
+        its bytes, and leaves anything extra buffered for the next
+        command. Previously a single recv() was split heuristically, so a
+        fragmented response was reported as invalid and the leftovers of
+        a multi-byte one were misread as the following command's reply.
+        """
+        while True:
+            token, consumed = frame_response(self._rx_buffer, expect)
+            if token is not None:
+                self._debug_rx_read(self._rx_buffer, [token])
+                self._rx_buffer = self._rx_buffer[consumed:]
+                return token
+            try:
+                chunk = self._socket.read()
+            except (socket.timeout, TimeoutError):
+                # Nothing more is coming. Two forms are ambiguous until
+                # this point -- bare F, and the 8-byte timestamp -- so
+                # resolve them now rather than waiting forever.
+                token, consumed = frame_response(
+                    self._rx_buffer, expect, final=True,
+                )
+                if token is None:
+                    raise
+                self._debug_rx_read(self._rx_buffer, [token])
+                self._rx_buffer = self._rx_buffer[consumed:]
+                return token
+            if not chunk:
+                # An orderly close: recv() returning b'' means the peer
+                # is gone, and no amount of further reading will help.
+                self._rx_buffer = b''
+                raise SocketException(
+                    'Net Station closed the ECI connection'
+                )
+            self._rx_buffer += chunk
 
     def _command(
         self,
@@ -2664,7 +2748,7 @@ class NetStation(object):
             eci_cmd = build_command(cmd, data)
             self._debug_tx(cmd, data, eci_cmd)
             self._socket.write(eci_cmd)
-            response = self._read_response_token()
+            response = self._read_response_token(response_shape(cmd))
             try:
                 parsed = parse_response(response)
             except InvalidECIResponse as err:

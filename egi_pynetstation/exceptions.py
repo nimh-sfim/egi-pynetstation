@@ -138,8 +138,14 @@ class ECIResponseFailure(ECIException):
 
 class ECIFailure(ECIResponseFailure):
     """Exception for when the amp responds with simple fail"""
-    def __init__(self) -> None:
-        self.message = 'Amp responded with Failure'
+    def __init__(self, status: bytes = None) -> None:
+        if status:
+            self.message = (
+                'Amp responded with Failure; status bytes '
+                f'{status.hex()}'
+            )
+        else:
+            self.message = 'Amp responded with Failure'
         super().__init__(self.message)
 
 

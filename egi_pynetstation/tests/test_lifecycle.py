@@ -228,7 +228,7 @@ def _concrete_exceptions():
 SAMPLE_ARGS = {
     'transmitted': 1, 'expected': 2, 'arg': 'x', 'invalidcmd': 'x',
     'cmd': 'x', 'data': 'x', 'endian': 'x', 'noninteger': 'x',
-    'o': b'x', 'bytearr': b'x' * 4, 'message': 'a message',
+    'o': b'x', 'bytearr': b'x' * 4, 'message': 'a message', 'status': b'\x00\x02',
 }
 
 
@@ -562,3 +562,119 @@ def test_health_fields_appear_in_clock_state(monkeypatch, tmp_path):
                 'ntp_sampling_stale', 'ntp_last_error'):
         assert key in state, key
     ns.disconnect()
+
+
+# --- #5c: connection setup is transactional ------------------------------
+
+def make_failing_connect(monkeypatch, reply=b'Z'):
+    """A station whose amplifier answers `reply`, tracking socket closes."""
+    monkeypatch.setattr(
+        netstation_module, 'NTPClient',
+        lambda: types.SimpleNamespace(request=lambda *a, **k: FakeResponse()),
+    )
+    closes = []
+
+    class FakeSocket:
+        def __init__(self, *a, **k):
+            pass
+
+        def connect(self):
+            pass
+
+        def write(self, data):
+            pass
+
+        def read(self):
+            return reply
+
+        def disconnect(self):
+            closes.append(True)
+
+    monkeypatch.setattr(netstation_module, 'Socket', FakeSocket)
+    return NetStation('10.10.10.42', 55513), closes
+
+
+def eci_threads():
+    return [t for t in threading.enumerate() if t.name.startswith('eci-')]
+
+
+@pytest.mark.parametrize('reply,exc', [(b'F', ECIFailure),
+                                       (b'\x00', InvalidECIResponse)])
+def test_failed_handshake_leaves_no_partial_connection(
+    reply, exc, monkeypatch,
+):
+    """Setup is all-or-nothing.
+
+    A rejected handshake used to leave an open socket, a live sampler
+    thread, and `_connected` set, so the object looked usable and the
+    next call failed somewhere less obvious.
+    """
+    before = len(eci_threads())
+    ns, closes = make_failing_connect(monkeypatch, reply=reply)
+
+    with pytest.raises(exc):
+        ns.connect(ntp_ip='10.10.10.51')
+
+    assert ns._connected is False
+    assert ns._ntp_ip is None
+    assert closes                        # socket was closed
+    assert len(eci_threads()) == before   # no thread left running
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'drift_min_samples': 1},
+    {'drift_window_minutes': -5},
+])
+def test_invalid_drift_argument_leaves_no_partial_connection(
+    kwargs, monkeypatch,
+):
+    before = len(eci_threads())
+    ns, closes = make_failing_connect(monkeypatch)
+
+    with pytest.raises(ValueError):
+        ns.connect(ntp_ip='10.10.10.51', **kwargs)
+
+    assert ns._connected is False
+    assert closes
+    assert len(eci_threads()) == before
+
+
+def test_connect_succeeds_after_a_failed_attempt(monkeypatch):
+    """A failed setup must not poison the object for a later good one."""
+    replies = {'value': b'F'}
+
+    monkeypatch.setattr(
+        netstation_module, 'NTPClient',
+        lambda: types.SimpleNamespace(request=lambda *a, **k: FakeResponse()),
+    )
+
+    class FakeSocket:
+        def __init__(self, *a, **k):
+            pass
+
+        def connect(self):
+            pass
+
+        def write(self, data):
+            pass
+
+        def read(self):
+            return replies['value']
+
+        def disconnect(self):
+            pass
+
+    monkeypatch.setattr(netstation_module, 'Socket', FakeSocket)
+    ns = NetStation('10.10.10.42', 55513)
+
+    with pytest.raises(ECIFailure):
+        ns.connect(ntp_ip='10.10.10.51')
+
+    replies['value'] = b'Z'
+    ns.connect(ntp_ip='10.10.10.51')
+    try:
+        ns.begin_rec()
+        assert ns.rec_start() is not None
+        assert ns.getTime() is not None
+    finally:
+        ns.disconnect()

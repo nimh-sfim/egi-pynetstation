@@ -78,6 +78,20 @@ difference. A healthy machine looks like this::
       Windows timing lever is ``rush()``, which sets thread and process
       priority. Do not assume importing PsychoPy fixes this.
 
+   .. note::
+
+      ``timeBeginPeriod()`` is **not** system-wide on current Windows.
+      Since Windows 10 version 2004 the request applies to the calling
+      process only, and on Windows 11 a process whose window is
+      minimised or occluded can silently lose the resolution it asked
+      for. Two consequences: call it from your own experiment process
+      rather than relying on another program having raised it, and keep
+      the stimulus window in the foreground for the whole run.
+
+      Trust the *measured* ``time.time()`` and ``time.monotonic()``
+      resolutions over the nominal timer setting. They are what the
+      drift corrector actually experiences.
+
    To find out what your machine actually does:
 
    .. code-block:: bash

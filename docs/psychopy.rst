@@ -1,9 +1,13 @@
 Using PsychoPy
 ==============
 
-Send markers straight from ``win.callOnFlip()``. The package owns the
-threading, the timestamp capture, and the flushing, so there is nothing
-to configure.
+Quickstart: background sampling is already on
+----------------------------------------------
+
+The default setup is the recommended setup for PsychoPy.  Drift correction
+and the background thread that supplies it with NTP samples are both enabled
+automatically.  Send markers straight from ``win.callOnFlip()``; there is no
+sampling call to add to the trial loop and no drift option to configure.
 
 .. code-block:: python
 
@@ -29,15 +33,26 @@ to configure.
         ns.end_rec()      # flushes any queued events
         ns.disconnect()
 
-That is the whole integration — no ``queue``, no ``threading``, no manual
-timestamp bookkeeping. A complete working version is
+.. important::
+
+   The example above is complete.  As long as you leave
+   ``auto_drift_background`` at its default of ``True``, do **not** add
+   ``sample_drift_if_due()`` or ``sample_drift()`` calls.  The package takes
+   samples on its own thread.
+
+   The :ref:`manual-drift-sampling` section is only for experiments that
+   deliberately pass ``auto_drift_background=False``.  Default users can
+   skip it entirely.
+
+There is no ``queue``, no ``threading``, no manual timestamp bookkeeping,
+and no inter-trial sampling hook to maintain. A complete working version is
 :doc:`example3_stroop.py <examples>`.
 
-All the commands you need to know
----------------------------------
+Core calls in the default setup
+-------------------------------
 
-Seven calls cover a complete experiment. Everything else in this package
-is diagnostics or tuning.
+Six calls cover a complete experiment. Everything else in this package is
+diagnostics or optional tuning.
 
 ``ns.connect(...)``
 ^^^^^^^^^^^^^^^^^^^
@@ -52,8 +67,9 @@ address:
     ns.connect(ntp_ip='10.10.10.51')
 
 Pass ``auto_drift_background=False`` if you need explicit control over
-exactly when sampling happens instead. See :doc:`drift` for the full set
-and the advanced manual-sampling options.
+exactly when sampling happens instead. If you do not pass that option, skip
+:ref:`manual-drift-sampling`. See :doc:`drift` for the full set of advanced
+manual-sampling options.
 
 ``ns.begin_rec()``
 ^^^^^^^^^^^^^^^^^^
@@ -109,8 +125,18 @@ flip callback marks the flip, and calling it from your trial loop marks
 that line of code — both are equally precise. Returns ``None``; pass
 ``wait=True`` only if you need the amplifier's reply.
 
-``ns.sample_drift_if_due(available_pause=...)`` *(advanced)*
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. _manual-drift-sampling:
+
+Optional: only after disabling background sampling
+---------------------------------------------------
+
+This section applies only if you deliberately connected with
+``auto_drift_background=False``.  With the default ``True`` setting, the
+background sampler already does this work and you should continue at
+:ref:`psychopy-cleanup`.
+
+``ns.sample_drift_if_due(available_pause=...)``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Background sampling already covers this for you. You only need this
 call if you have opted out of it with ``auto_drift_background=False``,
@@ -241,6 +267,11 @@ specific reason not to. If you do, use ``sample_drift_if_due()`` in your
 trial loop, where the schedule should decide; ``sample_drift()`` outside
 it — a warm-up loop, a rest break — where you decide.
 
+.. _psychopy-cleanup:
+
+Cleanup
+-------
+
 ``ns.end_rec()``
 ^^^^^^^^^^^^^^^^
 
@@ -276,8 +307,8 @@ experiment raises or the participant quits early:
             ns.end_rec()
         ns.disconnect()
 
-At a glance
-^^^^^^^^^^^
+Default setup at a glance
+-------------------------
 
 .. list-table::
    :header-rows: 1
@@ -293,10 +324,6 @@ At a glance
      - Every stimulus onset you want marked.
    * - ``ns.send_event(...)``
      - Responses, trial boundaries, anything not tied to a flip.
-   * - ``ns.sample_drift_if_due(...)``
-     - Every inter-trial interval; the schedule decides.
-   * - ``ns.sample_drift()``
-     - Warm-up, rest breaks — any moment you know is safe.
    * - ``ns.end_rec()``
      - Once, at the end.
    * - ``ns.disconnect()``

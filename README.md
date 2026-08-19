@@ -91,6 +91,24 @@ ns.disconnect()
 Event types must be exactly four ASCII characters. The default
 `start="now"` uses `ns.getTime()` to timestamp the event.
 
+### Byte Order (`endian`)
+
+The default `endian='NTEL'` is correct on both Intel and Apple silicon Macs.
+The value is a legacy ECI byte-order token, not a current processor or
+operating-system name:
+
+| Token | Byte order | Appropriate systems |
+|---|---|---|
+| `NTEL` | Little-endian | All current Macs (Intel and Apple silicon), Intel/AMD PCs, and most current ARM64 systems |
+| `MAC-` | Big-endian | Legacy PowerPC-era Macs |
+| `UNIX` | Big-endian | Legacy big-endian Unix systems |
+
+Do not select `MAC-` merely because the stimulus computer is a Mac. Passing
+a big-endian token from a little-endian computer makes the ECI handshake
+disagree with the package's native-packed multibyte values. Big-endian hosts
+are represented by the protocol but have not been tested with this package.
+See [Diagnostics](docs/diagnostics.rst) for the protocol background.
+
 ---
 
 # Integrating With Your Own PsychoPy Experiment

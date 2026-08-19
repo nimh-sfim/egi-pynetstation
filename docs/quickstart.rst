@@ -27,6 +27,11 @@ events, stop.
     ns.end_rec()
     ns.disconnect()
 
+The default ``endian='NTEL'`` is correct on both Intel and Apple silicon
+Macs because both are little-endian.  ``NTEL`` is a legacy ECI byte-order
+token, not a requirement that the processor be made by Intel.  See
+:ref:`eci-byte-order` before overriding it.
+
 ``begin_rec()`` performs the one ECI ``NTPClockSync`` that establishes the
 event timestamp epoch, so it must come before any events.
 

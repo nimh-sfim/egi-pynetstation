@@ -36,5 +36,5 @@ setuptools.setup(
             'sphinx_rtd_theme',
         ]
     },
-    python_requires='>=3.8',
+    python_requires='>=3.9',
 )

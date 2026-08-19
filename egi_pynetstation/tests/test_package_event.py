@@ -265,3 +265,68 @@ def test_label_and_desc_boundary_lengths_pack():
                 label, desc, valid_data,
             )
         assert expected in str(err.value)
+
+
+# --- fixed-width field limits -------------------------------------------
+
+"""Every ECI event field is fixed-width.
+
+Out-of-range input used to reach struct.pack() and die with an opaque
+struct.error naming neither the field nor the value -- or, for non-ASCII
+text, a bare UnicodeEncodeError from inside packing. These assert that
+each bound is checked up front and reported against the field it belongs
+to. TypeError is what package_event already raises for its range checks
+(start >= 0, duration >= 0.001), so the new checks follow that rather
+than introducing a second convention.
+"""
+
+
+def _event(**overrides):
+    kwargs = dict(
+        start=valid_start, duration=valid_duration, event_type=valid_type,
+        label=valid_label, desc=valid_description, data={},
+    )
+    kwargs.update(overrides)
+    return package_event(**kwargs)
+
+
+@pytest.mark.parametrize('overrides,expected', [
+    ({'data': {f'k{i:03d}': 1 for i in range(256)}}, '<= 255 keys'),
+    ({'data': {'txt_': 'x' * 65536}}, '65536-byte value'),
+    ({'data': {'num_': 2 ** 31}}, 'signed 32-bit'),
+    ({'data': {'num_': -2 ** 31 - 1}}, 'signed 32-bit'),
+    ({'start': 3e6}, 'signed 32-bit'),
+    ({'data': {f'k{i:03d}': 'x' * 600 for i in range(120)}}, '65535'),
+])
+def test_out_of_range_fields_report_the_field(overrides, expected):
+    with pytest.raises(TypeError) as err:
+        _event(**overrides)
+    assert expected in str(err.value)
+    # Never the raw struct error.
+    assert 'struct' not in type(err.value).__name__.lower()
+
+
+@pytest.mark.parametrize('overrides,field', [
+    ({'label': 'café'}, 'label'),
+    ({'desc': 'naïve'}, 'description'),
+    ({'data': {'txt_': 'naïve'}}, 'data key txt_'),
+    ({'data': {'kéy_': 1}}, 'data key'),
+])
+def test_non_ascii_is_reported_against_its_field(overrides, field):
+    with pytest.raises(TypeError) as err:
+        _event(**overrides)
+    assert 'ASCII' in str(err.value)
+    assert field in str(err.value)
+
+
+@pytest.mark.parametrize('overrides', [
+    {'data': {f'k{i:03d}': 1 for i in range(255)}},     # max keys
+    {'data': {'txt_': 'x' * 65000}},                    # long text value
+    {'data': {'num_': 2 ** 31 - 1}},                    # max signed int
+    {'data': {'num_': -2 ** 31}},                       # min signed int
+    {'label': 'l' * 255},                               # max label
+    {'desc': 'd' * 255},                                # max description
+])
+def test_boundary_values_still_pack(overrides):
+    """The limits must be the real ones, not one conservative step in."""
+    assert isinstance(_event(**overrides), bytes)
