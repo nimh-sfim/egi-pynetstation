@@ -58,7 +58,10 @@ jobs:
     - name: Test with pytest
       run: pytest egi_pynetstation/tests -v
     - name: Check the clock-resolution reporter runs
-      run: python -m egi_pynetstation.check_clocks
+      # Shared CI runners are not stimulus computers and can be heavily
+      # loaded. Exercise the report without treating an unsuitable runner's
+      # diagnostic return value as a package failure; exceptions still fail.
+      run: python -c "from egi_pynetstation.check_clocks import run_report; run_report()"
 
   docs:
     runs-on: ubuntu-latest

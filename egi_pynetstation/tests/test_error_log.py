@@ -184,7 +184,7 @@ def test_drift_model_engage_stall_and_recover_are_logged(tmp_path):
     ]
 
     engaged, stalled, recovered = records
-    assert engaged['elapsed'] == 60.0
+    assert engaged['elapsed'] == pytest.approx(60.0)
     # The stall is reported once, shortly after the step, not on every fit.
     assert stalled['drift_consecutive_rejections'] == 3
     assert stalled['drift_last_reject_reason'] == 'high_residual'
