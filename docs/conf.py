@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath('..'))
 # -- Project information -----------------------------------------------------
 
 project = 'egi-pynetstation'
-copyright = '2021, Joshua B. Teves and Peter J. Molfese'
+copyright = '2021-2026, Joshua B. Teves and Peter J. Molfese'
 author = 'Joshua B. Teves and Peter J. Molfese'
 
 # The full version, including alpha/beta/rc tags
