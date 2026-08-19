@@ -136,7 +136,12 @@ def make_bare_station(tmp_path):
     log = tmp_path / 'drift.jsonl'
     ns = NetStation('127.0.0.1', 55513, error_log=str(log))
     ns._connected = True
-    ns._sync_monotonic = time.monotonic()
+    # These tests advance a synthetic clock in exact 15-second steps. Using
+    # the host's (potentially large) monotonic value as the origin makes
+    # ``origin + 60 - origin`` round just below 60 on some runners, delaying
+    # the minimum-span gate by one sample and making the fixture platform
+    # dependent.
+    ns._sync_monotonic = 0.0
     ns._syncepoch = time.time()
     ns._offset = 0.0
     ns._offset_mono = 0.0

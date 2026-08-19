@@ -53,8 +53,7 @@ jobs:
         # branch, and a check that cannot fail is not a check.
         # - F403/F405: this package uses `import *` from .exceptions
         # - W503/W504: mutually exclusive rules; only one can be satisfied
-        flake8 egi_pynetstation --count --statistics \
-          --ignore=F403,F405,W503,W504 --max-line-length=120
+        flake8 egi_pynetstation --count --statistics --ignore=F403,F405,W503,W504 --max-line-length=120
     - name: Test with pytest
       run: pytest egi_pynetstation/tests -v
     - name: Check the clock-resolution reporter runs
