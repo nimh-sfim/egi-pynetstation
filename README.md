@@ -202,6 +202,9 @@ ns.configure_auto_drift(enabled=True, interval=15.0, min_pause=0.35,
 ns.set_drift_sampling(samples=4, spacing=0.05)
 
 # Drift model
+#   Only pass the options you are deliberately choosing; anything omitted
+#   keeps -- and keeps tracking -- the package default.
+#   ns.connect(ntp_ip=..., **{'drift_min_samples': 7})
 ns.set_drift_correction(True)
 ns.set_drift_requirements(min_samples=13, min_span=180.0)
 ns.set_drift_model_options(max_delay=0.010, max_residual=0.003,
@@ -212,6 +215,7 @@ ns.refresh_drift_model()
 # Inspection and diagnostics
 ns.session_summary()                  # start here: one-call health check
 ns.clock_state()                      # full clock and drift state
+ns.drift_settings()                   # every drift setting in effect
 ns.drift_estimate()
 ns.drift_history()
 ns.event_errors()                     # failures from asynchronous sends

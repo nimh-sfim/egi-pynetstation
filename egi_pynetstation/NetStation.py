@@ -1987,6 +1987,68 @@ class NetStation(object):
             'ntp_seconds_since_success': health['ntp_seconds_since_success'],
         }
 
+    def drift_settings(self) -> dict:
+        """Report every drift setting currently in effect.
+
+        This is a *report*, not a template to copy and edit. It answers
+        "what did this session actually run with", which is worth logging
+        beside your data, and "what are the defaults", which is otherwise
+        surprisingly hard to obtain: every drift parameter of
+        :meth:`connect` defaults to None meaning *leave unchanged*, so
+        reading the signature tells you nothing about the real values.
+
+        Deliberately usable before ``connect()``, so a launcher dialog can
+        populate its fields with the true defaults.
+
+        Notes
+        -----
+        Keys are the :meth:`connect` keyword names, matching the settings
+        table in the drift documentation.
+
+        Do not save the whole dictionary as a configuration template.
+        Doing so pins all of these values at the version you captured
+        them, so a later release that improves a default cannot reach your
+        experiment, and nothing reports that it did not. To set options
+        programmatically, build a dict of only the ones you are choosing
+        deliberately and pass it as ``ns.connect(ntp_ip=..., **options)``;
+        everything you leave out then tracks the package default.
+
+        ``drift_stall_after`` is included because it is a real setting and
+        this is a complete report, but it is not a ``connect()`` argument
+        -- it is set afterwards through :meth:`set_drift_stability`. That
+        also means splatting this dictionary straight into ``connect()``
+        raises TypeError rather than quietly doing the wrong thing, which
+        is the intended outcome given the paragraph above.
+
+        ``drift_window_minutes`` and ``drift_max_model_age`` report ``0``
+        for "no limit", matching the convention ``connect()`` accepts,
+        rather than the None they are stored as internally.
+        """
+        with self._clock_lock:
+            return {
+                'drift_correction': self._drift_correction,
+                'drift_min_samples': self._drift_min_samples,
+                'drift_min_span': self._drift_min_span,
+                'drift_max_delay': self._drift_max_delay,
+                'drift_max_residual': self._drift_max_residual,
+                'drift_window_minutes': (
+                    0.0 if self._drift_window is None
+                    else self._drift_window / 60.0
+                ),
+                'drift_samples': self._drift_samples_per_call,
+                'drift_sample_spacing': self._drift_sample_spacing,
+                'drift_slew': self._drift_slew,
+                'drift_max_model_age': (
+                    0.0 if self._drift_max_model_age is None
+                    else self._drift_max_model_age
+                ),
+                'drift_stall_after': self._drift_stall_after,
+                'auto_drift': self._auto_drift_enabled,
+                'auto_drift_interval': self._auto_drift_interval,
+                'auto_drift_min_pause': self._auto_drift_min_pause,
+                'auto_drift_background': self._auto_drift_background,
+            }
+
     def clock_state(self) -> dict:
         """Return current client/server clock synchronization state."""
         health = self._ntp_sampling_health()

@@ -280,10 +280,17 @@ def main():
                 if rts:
                     print(f'  mean {name} RT: {sum(rts) / len(rts):.3f} s')
 
-        # Asynchronous sends cannot raise into experiment code, so check.
-        errors = ns.event_errors()
-        if errors:
-            print(f'WARNING: {len(errors)} events failed to send:', errors[:3])
+        # Asynchronous sends cannot raise into experiment code, so nothing
+        # above would have told you if a marker never arrived. One call
+        # covers that plus the drift model and any rejected ECI response.
+        summary = ns.session_summary()
+        if summary['ok']:
+            print('Session OK:', summary)
+        else:
+            print('WARNING: check this session before analysing it:')
+            print(f'  {summary}')
+            for failure in ns.event_errors()[:3]:
+                print(f'  failed send: {failure}')
     finally:
         # EGI 7: close cleanly. Both of these flush any queued events first,
         # so markers sent on the last trial still reach Net Station.

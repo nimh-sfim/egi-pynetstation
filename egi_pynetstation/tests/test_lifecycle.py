@@ -759,3 +759,74 @@ def test_drift_options_dict_rejects_a_missing_key(monkeypatch):
             )
     finally:
         ns.disconnect()
+
+
+# --- drift_settings() reports what is really in effect --------------------
+
+def test_drift_settings_works_before_connect(monkeypatch):
+    """Readable unconnected, which is the point: connect()'s signature
+    defaults are all None, so the real defaults are otherwise hidden."""
+    ns = NetStation('10.10.10.42', 55513)
+    settings = ns.drift_settings()
+    assert settings['drift_min_samples'] == 13
+    assert settings['drift_min_span'] == 180.0
+    assert settings['drift_window_minutes'] == 15.0
+    assert settings['auto_drift_background'] is True
+
+
+def test_drift_settings_reports_what_connect_applied(monkeypatch):
+    """The report tracks the session, not the defaults."""
+    ns, _ = make_connected(monkeypatch)
+    ns.disconnect()
+    ns.connect(
+        ntp_ip='10.10.10.51',
+        drift_min_samples=7,
+        drift_window_minutes=9.0,
+        auto_drift_background=False,
+    )
+    try:
+        settings = ns.drift_settings()
+        assert settings['drift_min_samples'] == 7
+        assert settings['drift_window_minutes'] == 9.0
+        assert settings['auto_drift_background'] is False
+        # Untouched options still report the package default.
+        assert settings['drift_min_span'] == 180.0
+        assert settings['drift_max_delay'] == 0.010
+    finally:
+        ns.disconnect()
+
+
+def test_drift_settings_reports_no_limit_as_zero(monkeypatch):
+    """0 means "no limit" to connect(); None is only the internal form."""
+    ns, _ = make_connected(monkeypatch)
+    ns.disconnect()
+    ns.connect(
+        ntp_ip='10.10.10.51',
+        drift_window_minutes=0,
+        drift_max_model_age=0,
+        auto_drift_background=False,
+    )
+    try:
+        settings = ns.drift_settings()
+        assert settings['drift_window_minutes'] == 0.0
+        assert settings['drift_max_model_age'] == 0.0
+    finally:
+        ns.disconnect()
+
+
+def test_drift_settings_covers_every_connect_drift_argument():
+    """No drift argument of connect() may go unreported.
+
+    The report exists to say what a session ran with. An option added to
+    connect() and forgotten here would leave a silent hole in that.
+    """
+    import inspect
+
+    reported = set(NetStation('10.0.0.1', 1).drift_settings())
+    accepted = {
+        name for name in inspect.signature(NetStation.connect).parameters
+        if name.startswith(('drift_', 'auto_drift'))
+    }
+    assert accepted - reported == set()
+    # The one documented extra: settable only via set_drift_stability().
+    assert reported - accepted == {'drift_stall_after'}

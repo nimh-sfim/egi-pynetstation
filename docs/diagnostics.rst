@@ -26,6 +26,9 @@ Related accessors:
   call covering drift, event, ECI, and NTP-sampling health.
 * :meth:`~egi_pynetstation.NetStation.NetStation.pending_events` — how
   many events are still queued.
+* :meth:`~egi_pynetstation.NetStation.NetStation.drift_settings` — every
+  drift setting in effect. Worth logging beside your data, so a session's
+  configuration is recoverable later. See :doc:`drift`.
 
 What healthy looks like
 -----------------------

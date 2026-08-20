@@ -341,6 +341,64 @@ Settings reference
      - Sample from a package-owned thread. Set ``False`` for manual,
        advanced control instead. See :ref:`advanced-manual-sampling`.
 
+Setting options programmatically
+--------------------------------
+
+Every setting in the table is a keyword argument of ``connect()``, so a
+dict of the ones you are choosing deliberately can be splatted in:
+
+.. code-block:: python
+
+    drift_opts = {
+        'drift_min_samples': 7,
+        'drift_window_minutes': 9.0,
+    }
+    ns.connect(ntp_ip='10.10.10.51', **drift_opts)
+
+Include only what you are actually choosing. Everything you leave out
+keeps the package default, and — this is the point — keeps tracking it,
+so a later release that improves a default reaches your experiment.
+
+To read the settings currently in effect, for a log or to populate a
+launcher dialog:
+
+.. code-block:: python
+
+    ns.drift_settings()
+
+.. code-block:: python
+
+    {'drift_correction': True, 'drift_min_samples': 13,
+     'drift_min_span': 180.0, 'drift_max_delay': 0.01,
+     'drift_max_residual': 0.003, 'drift_window_minutes': 15.0,
+     'drift_samples': 4, 'drift_sample_spacing': 0.05,
+     'drift_slew': 0.0002, 'drift_max_model_age': 600.0,
+     'drift_stall_after': 5, 'auto_drift': True,
+     'auto_drift_interval': 15.0, 'auto_drift_min_pause': 0.35,
+     'auto_drift_background': True}
+
+It works before ``connect()`` as well, which is the only straightforward
+way to obtain the real defaults: every drift parameter of ``connect()``
+has a signature default of ``None``, meaning *leave unchanged*, so
+inspecting the signature reports nothing useful.
+
+``drift_window_minutes`` and ``drift_max_model_age`` report ``0`` for "no
+limit", matching what ``connect()`` accepts.
+
+.. warning::
+
+   ``drift_settings()`` is a report, not a configuration template. Saving
+   the whole dictionary into an experiment scaffold pins all of these
+   values at the version you captured them: a later release that improves
+   a default can no longer reach that experiment, and nothing warns you.
+   Keep a dict of your deliberate choices instead.
+
+   ``drift_stall_after`` is reported for completeness but is not a
+   ``connect()`` argument — it is set afterwards with
+   :meth:`~egi_pynetstation.NetStation.NetStation.set_drift_stability` —
+   so passing the whole dictionary to ``connect()`` raises ``TypeError``
+   rather than silently misconfiguring the session.
+
 Checking that it worked
 -----------------------
 

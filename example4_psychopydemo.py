@@ -82,12 +82,14 @@ try:
         win.flip()
         core.wait(1.0)
 
-    print('Drift estimate:', ns.drift_estimate())
-
     # Asynchronous sends cannot raise into experiment code, so check here.
-    errors = ns.event_errors()
-    if errors:
-        print(f'WARNING: {len(errors)} events failed to send:', errors[:3])
+    # session_summary() is the one call worth making at the end of a run:
+    # 'ok' is True only when drift correction engaged and is not stalled,
+    # NTP sampling is current, and no event or ECI response failed.
+    summary = ns.session_summary()
+    print('Session summary:', summary)
+    if not summary['ok']:
+        print('WARNING: check this session before analysing it.')
 finally:
     if recording_started:
         ns.end_rec()    # flushes any events still queued

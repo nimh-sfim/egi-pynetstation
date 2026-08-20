@@ -57,6 +57,15 @@ def main():
         eci_client.send_event(event_type=name)
 
     eci_client.end_rec()
+
+    # send_event() does not block and so cannot report a failed send. Check
+    # once at the end: 'ok' is True only when drift correction engaged and
+    # is not stalled, NTP sampling is current, and nothing failed to send.
+    summary = eci_client.session_summary()
+    print('Session summary:', summary)
+    if not summary['ok']:
+        print('WARNING: check this session before analysing it.')
+
     eci_client.disconnect()
 
 

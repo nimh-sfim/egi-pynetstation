@@ -795,6 +795,17 @@ def main(argv=None) -> int:
                 'the initial NTP sync only.'
             )
         print('Drift estimate:', ns.drift_estimate())
+        # The detail above is what a validation run wants. This is the
+        # one-line verdict, and it covers a case none of the checks above
+        # do: if NTP sampling stopped entirely, no fit is ever attempted,
+        # so drift_stalled stays False while the correction goes stale.
+        summary = ns.session_summary()
+        print('\nSession summary:', summary)
+        if not summary['ok']:
+            print(
+                'WARNING: this run did not meet every health check. Treat '
+                'its timing numbers with care.'
+            )
         return 0
     except KeyboardInterrupt:
         print('\nExperiment stopped early by the operator.', file=sys.stderr)

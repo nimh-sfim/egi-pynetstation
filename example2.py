@@ -160,6 +160,27 @@ def print_offsets(ns: NetStation) -> None:
     print(f'  predicted server-start delta now: {predicted_now:.9f} s')
 
 
+def print_session_summary(ns: NetStation) -> None:
+    """One-line health verdict, plus what to look at when it is False."""
+    summary = ns.session_summary()
+    print('\nSession summary:')
+    print(f"  ok: {summary['ok']}")
+    for key in (
+        'drift_engaged',
+        'drift_stalled',
+        'drift_accepted_fits',
+        'drift_rejected_fits',
+        'drift_samples',
+        'active_drift_slope_ms_per_hour',
+        'event_send_failures',
+        'eci_response_failures',
+        'ntp_sampling_stale',
+        'ntp_sample_failures',
+        'ntp_seconds_since_success',
+    ):
+        print(f'  {key}: {summary[key]}')
+
+
 def print_clock_state(ns: NetStation) -> None:
     state = ns.clock_state()
     print('\nClock state:')
@@ -616,6 +637,7 @@ def main() -> None:
               if ensure_connected() else None),
         'o': ('show offset history', lambda: print_offsets(ns)),
         'k': ('show clock state', lambda: print_clock_state(ns)),
+        'z': ('show session summary', lambda: print_session_summary(ns)),
         'x': ('Exit + close socket', close),
     }
 
@@ -686,6 +708,8 @@ def main() -> None:
                         if ensure_connected() else None),
         'offsets': ('show offset history', lambda: print_offsets(ns)),
         'clock_state': ('show clock state', lambda: print_clock_state(ns)),
+        'session_summary': ('show session summary',
+                            lambda: print_session_summary(ns)),
         'close': ('Exit + close socket', close),
         'exit': ('Exit + close socket', close),
     }
