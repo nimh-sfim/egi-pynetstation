@@ -110,3 +110,26 @@ def test_ci_lints_a_directory_that_exists():
         if not line.lstrip().startswith('#')
     ]
     assert not any('--exit-zero' in line for line in commands)
+
+
+def test_author_matches_between_packaging_files():
+    """setup.py and pyproject.toml must name the same author.
+
+    These had diverged: pyproject.toml said "Joshua Teves
+    <jbtevespro@gmail.com>" while setup.py said "Joshua B. Teves" at an
+    nih.gov address. Only pyproject.toml reaches PyPI, so the setup.py
+    copy was wrong in public view and nothing said so.
+    """
+    poetry = read_declared('pyproject.toml', r'^authors = \["([^"]+)"\]')
+    name = read_declared('setup.py', r"author='([^']+)'")
+    email = read_declared('setup.py', r"author_email='([^']+)'")
+    assert poetry == f'{name} <{email}>'
+
+
+def test_author_matches_citation_metadata():
+    """The packaged author is the one CITATION.cff credits first."""
+    given = read_declared('CITATION.cff', r'^    given-names: (.+)$')
+    family = read_declared('CITATION.cff', r'^  - family-names: (.+)$')
+    assert read_declared('setup.py', r"author='([^']+)'") == (
+        f'{given.strip()} {family.strip()}'
+    )

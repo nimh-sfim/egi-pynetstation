@@ -31,7 +31,15 @@ def connect_with_drift_options(
     handshake: bool,
     args,
 ) -> None:
-    """Connect while remaining compatible with older installed packages."""
+    """Connect using this repository's drift options.
+
+    This used to fall back to an older connect() API when the imported
+    package did not accept these arguments. That was the wrong call for a
+    diagnostic tool: the fallback quietly ran a different code path, and
+    then the console reported drift state for a configuration nobody had
+    asked for. Fail loudly instead, exactly as example5 does -- the usual
+    cause is an older copy of the package shadowing this repository.
+    """
     try:
         ns.connect(
             ntp_ip=ntp_ip,
@@ -44,42 +52,15 @@ def connect_with_drift_options(
             drift_window_minutes=args.drift_window_minutes,
         )
     except TypeError as err:
-        if not any(
-            name in str(err)
-            for name in (
-                'drift_correction',
-                'drift_min_samples',
-                'drift_min_span',
-                'drift_max_delay',
-                'drift_max_residual',
-                'drift_window_minutes',
-            )
-        ):
-            raise
-        print(
-            'Warning: imported NetStation.connect() does not accept '
-            'drift_correction. Falling back to the older connect() API. '
-            'Install this repository with `pip install -e .` to use the '
-            'built-in drift corrector.',
-            file=sys.stderr,
+        raise SystemExit(
+            'The imported egi_pynetstation does not accept the drift '
+            'options this console configures, so it would report drift '
+            'state for a session it did not actually set up.\n'
+            f'  error: {err}\n'
+            f'  loaded from: {NetStation.__module__}\n'
+            'Install this repository with `pip install -e .` and remove '
+            'any older copy with `pip uninstall egi_pynetstation`.'
         )
-        try:
-            ns.connect(ntp_ip=ntp_ip, handshake=handshake)
-        except TypeError:
-            ns.connect(ntp_ip=ntp_ip)
-        if hasattr(ns, 'set_drift_requirements'):
-            ns.set_drift_requirements(
-                args.drift_min_samples,
-                args.drift_min_span,
-            )
-        if hasattr(ns, 'set_drift_correction'):
-            ns.set_drift_correction(not args.no_drift_correction)
-        if hasattr(ns, 'set_drift_model_options'):
-            ns.set_drift_model_options(
-                max_delay=args.drift_max_delay,
-                max_residual=args.drift_max_residual,
-                window_minutes=args.drift_window_minutes,
-            )
 
 
 def print_result(result: object, ns: NetStation = None) -> None:

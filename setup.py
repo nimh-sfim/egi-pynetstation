@@ -15,7 +15,7 @@ setuptools.setup(
     name='egi_pynetstation',
     version='2.0.0',
     author='Joshua B. Teves',
-    author_email='joshua.teves@nih.gov',
+    author_email='jbtevespro@gmail.com',
     description='Magstim-EGI EEG amplifier NetStation API',
     long_description=long_description,
     long_description_content_type='text/markdown',
