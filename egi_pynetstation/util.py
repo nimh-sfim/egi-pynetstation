@@ -7,13 +7,9 @@ import sys
 from math import modf
 from typing import Union
 from struct import pack
-from time import strftime, localtime
-from datetime import datetime, timezone
 from .exceptions import *
 
 ntp_res = 2**-32
-ntp_epoch = datetime(1900, 1, 1, tzinfo=timezone.utc)
-unix_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def sys_to_bytes(number: int, size: int, signed: bool = False) -> bytes:
@@ -129,24 +125,3 @@ def get_ntp_float(bytearr: bytes) -> float:
             raise NTPInvalidByte(bytearr)
     else:
         raise NTPInvalidType(bytearr)
-
-
-def format_time(time: float) -> str:
-    """Format the float time in a human readable format
-
-    Parameter
-    ---------
-    time: float
-        Floating representation of a time, from time.time()
-
-    Returns
-    -------
-    A string representation of the time in human-readable format
-    """
-    subseconds, seconds = modf(time)
-    if subseconds < 0:
-        raise ValueError('Something strange has occurred')
-    subseconds *= 1e6
-    subseconds = int(subseconds)
-    fmt = '%Y-%m-%d:%I:%M%:%S'
-    return strftime(fmt, localtime(time)) + '.' + str(subseconds)

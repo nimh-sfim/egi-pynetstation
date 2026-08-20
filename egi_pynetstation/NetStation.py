@@ -415,14 +415,30 @@ class NetStation(object):
         self._reset_session_state()
         self._socket.connect()
         self._connected = True
+        # Collected by name rather than passed as seventeen positional
+        # arguments. Every value stays keyword-matched from here to the
+        # setter that consumes it, so adding an option cannot silently
+        # transpose two existing ones -- which a positional call across a
+        # line break made easy and invisible.
+        drift_options = {
+            'min_samples': drift_min_samples,
+            'min_span': drift_min_span,
+            'max_delay': drift_max_delay,
+            'max_residual': drift_max_residual,
+            'window_minutes': drift_window_minutes,
+            'samples': drift_samples,
+            'spacing': drift_sample_spacing,
+            'slew': drift_slew,
+            'max_model_age': drift_max_model_age,
+            'auto_enabled': auto_drift,
+            'auto_interval': auto_drift_interval,
+            'auto_min_pause': auto_drift_min_pause,
+            'auto_background': auto_drift_background,
+        }
         try:
             self._configure_and_handshake(
                 ntp_ip, handshake, drift_correction, strict_eci,
-                drift_min_samples, drift_min_span, drift_max_delay,
-                drift_max_residual, drift_window_minutes, drift_samples,
-                drift_sample_spacing, drift_slew, drift_max_model_age,
-                auto_drift, auto_drift_interval, auto_drift_min_pause,
-                auto_drift_background,
+                drift_options,
             )
         except Exception:
             # Setup is all-or-nothing. A rejected handshake or a bad drift
@@ -453,16 +469,40 @@ class NetStation(object):
         self._ntp_ip = None
         self._reset_session_state()
 
+    # Every key connect() may place in its drift_options dict. Listed here
+    # so a typo in either the producer or a consumer is caught at connect
+    # time by the check below, rather than silently leaving a setting at
+    # its default for the whole session.
+    _DRIFT_OPTION_KEYS = frozenset({
+        'min_samples', 'min_span',
+        'max_delay', 'max_residual', 'window_minutes',
+        'samples', 'spacing',
+        'slew', 'max_model_age',
+        'auto_enabled', 'auto_interval', 'auto_min_pause', 'auto_background',
+    })
+
     def _configure_and_handshake(
         self,
         ntp_ip, handshake, drift_correction, strict_eci,
-        drift_min_samples, drift_min_span, drift_max_delay,
-        drift_max_residual, drift_window_minutes, drift_samples,
-        drift_sample_spacing, drift_slew, drift_max_model_age,
-        auto_drift, auto_drift_interval, auto_drift_min_pause,
-        auto_drift_background,
+        drift_options: dict,
     ) -> None:
-        """The part of connect() that must succeed as a unit."""
+        """The part of connect() that must succeed as a unit.
+
+        ``drift_options`` carries the drift settings by name; see
+        ``_DRIFT_OPTION_KEYS``. Values are passed through untouched, so
+        None still means "leave this setting unchanged" at every setter.
+        """
+        unknown = set(drift_options) - self._DRIFT_OPTION_KEYS
+        if unknown:
+            raise KeyError(
+                f'unknown drift option(s): {sorted(unknown)}'
+            )
+        missing = self._DRIFT_OPTION_KEYS - set(drift_options)
+        if missing:
+            raise KeyError(
+                f'missing drift option(s): {sorted(missing)}'
+            )
+
         self._ntp_ip = ntp_ip
         self._drift_correction = drift_correction
         if strict_eci is not None:
@@ -473,29 +513,29 @@ class NetStation(object):
         # argument was dropped because a *sibling* argument was absent from
         # the guard. Do not reintroduce conditionals here.
         self.set_drift_requirements(
-            min_samples=drift_min_samples,
-            min_span=drift_min_span,
+            min_samples=drift_options['min_samples'],
+            min_span=drift_options['min_span'],
         )
         self.set_drift_model_options(
-            max_delay=drift_max_delay,
-            max_residual=drift_max_residual,
-            window_minutes=drift_window_minutes,
+            max_delay=drift_options['max_delay'],
+            max_residual=drift_options['max_residual'],
+            window_minutes=drift_options['window_minutes'],
         )
         self.set_drift_sampling(
-            samples=drift_samples,
-            spacing=drift_sample_spacing,
+            samples=drift_options['samples'],
+            spacing=drift_options['spacing'],
         )
         self.set_drift_stability(
-            slew=drift_slew,
-            max_model_age=drift_max_model_age,
+            slew=drift_options['slew'],
+            max_model_age=drift_options['max_model_age'],
         )
         # configure_auto_drift() also starts the background sampler as a
         # side effect, so it must run even when no argument was given.
         self.configure_auto_drift(
-            enabled=auto_drift,
-            interval=auto_drift_interval,
-            min_pause=auto_drift_min_pause,
-            background=auto_drift_background,
+            enabled=drift_options['auto_enabled'],
+            interval=drift_options['auto_interval'],
+            min_pause=drift_options['auto_min_pause'],
+            background=drift_options['auto_background'],
         )
         # Start the sender up front so the first send_event() -- which may
         # well be inside a flip callback -- does not pay the thread-start

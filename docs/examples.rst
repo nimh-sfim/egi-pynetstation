@@ -34,7 +34,7 @@ Stroop task
 
 It is written as a reference for the smallest clean setup: every line
 that talks to the amplifier is marked with an ``EGI:`` comment, and there
-are only eight of them.
+are only seven of them.
 
 .. code-block:: bash
 
@@ -196,6 +196,18 @@ What to check in the output
    moves the system clock and the correction passes through without a
    kink, the monotonic-frame referencing is working. An OS clock
    adjustment during a run is a useful test, not a problem.
+
+.. note::
+
+   **The constant offset is not a clock problem.** On the reference setup
+   the marker-to-photocell offset sits at about 65 ms, and that is fixed
+   hardware latency: GPU and display pipeline, photocell response, and
+   amplifier filtering and sampling. Drift correction does not remove it
+   and is not meant to — what it holds flat is the *variation* around it.
+
+   The value does not transfer between machines. Re-characterize it
+   whenever the display mode, refresh rate, stimulus screen position,
+   amplifier sampling rate, or Net Station filter settings change.
 
 The ``--sync-events`` flag exists to quantify what the background sender
 is worth. On the reference setup, ``send_call_span_ms`` in the flip

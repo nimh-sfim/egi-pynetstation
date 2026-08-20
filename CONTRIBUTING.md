@@ -30,6 +30,22 @@ delivery need particular care. Describe how timing was assessed, retain the
 monotonic-clock assumptions where applicable, and avoid introducing blocking
 work on a stimulus presentation or display-flip thread.
 
+### Adding a drift option
+
+`connect()` collects its drift settings into a `drift_options` dict and hands
+that to `_configure_and_handshake()`, which reads each value by name. Adding a
+setting means touching four places: the `connect()` signature and its
+docstring, the dict, `NetStation._DRIFT_OPTION_KEYS`, and the setter call that
+consumes it. `_configure_and_handshake()` rejects unknown and missing keys, so
+a typo or an omission fails at connect time rather than silently leaving the
+setting at its default.
+
+Two rules to preserve. Pass values through untouched — `None` means "leave
+unchanged" at every setter, and the conditionals that used to gate these calls
+caused three separate silent-config bugs. And extend
+`test_every_drift_option_reaches_its_setter` with a value distinct from both
+the default and the other options, which is what catches a transposition.
+
 Please update the relevant README and Sphinx documentation when changing a
 public API or a recommended experimental workflow. By contributing, you agree
 that your contributions may be distributed under the project's license.

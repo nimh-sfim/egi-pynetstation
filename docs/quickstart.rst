@@ -124,6 +124,49 @@ block is the right home for them:
             ns.end_rec()
         ns.disconnect()
 
+.. _checking-the-run:
+
+Check the run before you trust it
+---------------------------------
+
+``send_event()`` does not block, and that is what makes it safe to call
+from a flip callback — but it also means **it cannot tell you the send
+failed.** It returns ``None`` immediately, having handed the socket write
+to a worker thread. If that write fails, the marker never reaches Net
+Station and your experiment carries on with no exception and no return
+value to check.
+
+Nothing is hidden; it is just recorded rather than raised. One call
+reports it:
+
+.. code-block:: python
+
+    summary = ns.session_summary()
+    if not summary['ok']:
+        print(summary)
+
+Add that before ``disconnect()``, or right after it, and log the result
+alongside your behavioural data. ``ok`` is True only when drift correction
+engaged and is not stalled, NTP sampling is current, and no event or ECI
+response failed. When it is False, the rest of the dictionary says which
+of those it was.
+
+The same information is available piecewise —
+:meth:`~egi_pynetstation.NetStation.NetStation.event_errors` for failed
+sends, :meth:`~egi_pynetstation.NetStation.NetStation.eci_errors` for
+rejected or garbled ECI responses, and
+:meth:`~egi_pynetstation.NetStation.NetStation.clock_state` for the full
+drift picture. Passing ``error_log=`` to the constructor writes all of it
+to a JSON-lines file as the session runs, which is the version you will
+want when something did go wrong. See :doc:`diagnostics`.
+
+.. tip::
+
+   If you would rather a bad ECI response stop the run instead of being
+   recorded, pass ``strict_eci=True`` to ``connect()``. That is a good
+   setting for a pilot or a diagnostic session and a risky one for a real
+   participant, where losing one marker beats losing the whole recording.
+
 Next steps
 ----------
 

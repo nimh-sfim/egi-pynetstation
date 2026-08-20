@@ -678,3 +678,84 @@ def test_connect_succeeds_after_a_failed_attempt(monkeypatch):
         assert ns.getTime() is not None
     finally:
         ns.disconnect()
+
+
+# --- connect() must deliver every drift option to its setter -------------
+
+def test_every_drift_option_reaches_its_setter(monkeypatch):
+    """Each connect() drift argument lands on the setting it names.
+
+    connect() forwards these through a single dict rather than seventeen
+    positional arguments. The failure this guards against is silent: a
+    transposed or dropped argument leaves the setting at its default, the
+    session runs, and only the timing is wrong. Every value below is
+    deliberately distinct from both its default and the others, so a swap
+    between any two is visible here.
+    """
+    ns, _ = make_connected(monkeypatch)
+    ns.disconnect()
+
+    ns.connect(
+        ntp_ip='10.10.10.51',
+        drift_correction=False,
+        drift_min_samples=7,
+        drift_min_span=120.0,
+        drift_max_delay=0.011,
+        drift_max_residual=0.004,
+        drift_window_minutes=9.0,
+        drift_samples=6,
+        drift_sample_spacing=0.07,
+        drift_slew=0.0003,
+        drift_max_model_age=450.0,
+        auto_drift=True,
+        auto_drift_interval=21.0,
+        auto_drift_min_pause=0.55,
+        auto_drift_background=False,
+    )
+    try:
+        state = ns.clock_state()
+        assert state['drift_correction'] is False
+        assert state['drift_min_samples'] == 7
+        assert state['drift_min_span'] == 120.0
+        assert state['drift_max_delay'] == 0.011
+        assert state['drift_max_residual'] == 0.004
+        assert state['drift_window'] == 9.0 * 60.0
+        assert state['drift_samples_per_call'] == 6
+        assert state['drift_slew'] == 0.0003
+        assert state['drift_max_model_age'] == 450.0
+        # Not surfaced by clock_state(), so read them directly rather than
+        # leave the only two unpinned options in the set.
+        assert ns._drift_sample_spacing == 0.07
+        assert ns._auto_drift_enabled is True
+        assert ns._auto_drift_interval == 21.0
+        assert ns._auto_drift_min_pause == 0.55
+        assert ns._auto_drift_background is False
+    finally:
+        ns.disconnect()
+
+
+def test_drift_options_dict_rejects_an_unknown_key(monkeypatch):
+    """A typo in the option dict fails loudly at connect time."""
+    ns, _ = make_connected(monkeypatch)
+    try:
+        with pytest.raises(KeyError, match='unknown drift option'):
+            ns._configure_and_handshake(
+                '10.10.10.51', False, True, None,
+                dict.fromkeys(NetStation._DRIFT_OPTION_KEYS) | {'slwe': 1},
+            )
+    finally:
+        ns.disconnect()
+
+
+def test_drift_options_dict_rejects_a_missing_key(monkeypatch):
+    """Dropping an option is caught rather than left at its default."""
+    ns, _ = make_connected(monkeypatch)
+    try:
+        options = dict.fromkeys(NetStation._DRIFT_OPTION_KEYS)
+        del options['slew']
+        with pytest.raises(KeyError, match='missing drift option'):
+            ns._configure_and_handshake(
+                '10.10.10.51', False, True, None, options,
+            )
+    finally:
+        ns.disconnect()

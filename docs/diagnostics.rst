@@ -317,6 +317,23 @@ response for every command and therefore needs the reply. That is the
 right call for a console; experiments should keep the non-blocking
 default.
 
+Server clock start
+------------------
+
+:meth:`~egi_pynetstation.NetStation.NetStation.sync_return_clock`, which
+wraps the ECI ``NTPReturnClock`` command, is a **diagnostic** and not part
+of a production recording. On tested systems the amplifier does not answer
+it inline; the timestamp arrives on a following response, so the method
+sends up to ``max_followups`` real ``resy`` event markers — which land in
+the recording — while waiting for it. It also holds the ECI socket lock
+across every one of those round trips, so queued asynchronous events
+cannot go out until it returns.
+
+It is useful for investigating server clock-start behavior. It is not how
+drift is handled: that is :meth:`~egi_pynetstation.NetStation.NetStation.sample_drift`
+and the drift model, continuously and without touching the ECI clock. See
+:doc:`drift`.
+
 Timing validation
 -----------------
 
