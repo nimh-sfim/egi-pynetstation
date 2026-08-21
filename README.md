@@ -144,7 +144,7 @@ All live in the repository root.
 
 # Things To Get Right
 
-Short version of the three mistakes that actually cost people data. Each is
+Short version of the four mistakes that actually cost people data. Each is
 explained properly in the docs.
 
 **Drift correction is on by default, and so is sampling for it.** A background
@@ -172,6 +172,14 @@ if not summary['ok']:
 sampling is current, and no event or ECI response failed. Pass
 `error_log='run.jsonl'` to the constructor for the full record. See
 [Diagnostics](docs/diagnostics.rst).
+
+**Schedule stimuli in frames, not seconds.** Not a package issue — it never
+sees a frame — but it puts a clean 16.7 ms step in your data that looks just
+like a marker timing bug. If your interval is not a whole number of refresh
+periods, the request creeps through the refresh cycle until it crosses a frame
+boundary and the presented stimulus jumps a full frame, all at once, with
+nothing in the software looking different. Rapid designs are the most exposed.
+See [Using PsychoPy](docs/psychopy.rst).
 
 ---
 

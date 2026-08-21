@@ -430,6 +430,142 @@ reading at the critical moment and convert it later:
 the event timestamp for the instant of capture, not the instant of
 conversion.
 
+Rapid designs and the display beat
+----------------------------------
+
+This one is not about the package at all — the package never sees a frame
+— but it can put a clean 16.7 ms error into your data, and it is easy to
+mistake for a timing bug in the marker path. Anyone running short
+inter-stimulus intervals should know about it.
+
+Two rhythms that almost match
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Your display refreshes on a fixed heartbeat. Your experiment asks for a
+stimulus on its own schedule. If those two do not divide evenly, the
+request creeps through the refresh cycle a little more each trial.
+
+A real measurement: a display running at 60.00043 Hz — 7 parts per
+million fast — gives a frame period of 16.6665 ms. A 3.000 s interval is
+then 179.9987 frames, not 180. Each trial the request arrives 0.0013 of a
+frame earlier, about 22 microseconds.
+
+That creep is harmless in itself. What is not harmless is that a display
+can only show something **at a frame boundary**, so the outcome is
+binary: the request either makes this frame or waits for the next one::
+
+    frame:   |---------------|---------------|---------------|
+                           ^                              ^
+                      lands just before              lands just after
+                      -> shown here                  -> shown 16.7 ms later
+
+So a 22-microsecond-per-trial creep eventually produces a **one-frame
+step**, appearing all at once, with nothing in the software looking any
+different. In the run where this was measured, the marker-to-photocell
+offset jumped 17 ms at 16 minutes and dropped back at 57 minutes — 40.8
+minutes apart, against a predicted beat period of 39 minutes. Across the
+step, consecutive trials had identical flip intervals, identical event
+timestamps, and identical drift-model state.
+
+Why rapid designs are more exposed
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Two reasons, and they compound.
+
+**You cross the boundary more often.** The phase creeps by a fixed
+fraction of a frame *per trial*, so more trials per hour means a faster
+sweep. Halving the interval halves the beat period and doubles the number
+of crossings in a session.
+
+**A frame is a bigger share of what you are measuring.** 16.7 ms is 0.6%
+of a 3-second interval but 8% of a 200 ms one, and it is comparable to
+the latency separating many ERP components. The same absolute error is
+far more damaging in a fast design.
+
+Is your schedule vulnerable?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Divide each interval by the frame period and see how close it lands to a
+whole number:
+
+.. code-block:: python
+
+    frame_period = 1.0 / win.getActualFrameRate()
+    for isi in set(my_intervals):
+        frames = isi / frame_period
+        slip = abs(frames - round(frames))
+        if slip > 1e-9:
+            print(f'{isi:g} s = {frames:.4f} frames, '
+                  f'beat every {(1 / slip) * isi / 60:.0f} min')
+
+Note that measuring the refresh matters. At *exactly* 60.000 Hz every
+common interval is a whole number of frames and there is no beat at all.
+The problem only appears once you use the real number.
+
+The fix: count frames, not seconds
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The beat exists because there are two rhythms. Schedule in frames and
+there is only one, so the request lands at the same point in the refresh
+cycle every time and there is no boundary to cross.
+
+Instead of waiting on a clock:
+
+.. code-block:: python
+
+    while clock.getTime() < next_onset:     # phase sweeps
+        win.flip()
+
+count the frames you have actually drawn:
+
+.. code-block:: python
+
+    isi_frames = max(1, round(isi / frame_period))
+    onset_frame += isi_frames
+    while frame < onset_frame - 1:          # phase is constant
+        win.flip()
+        frame += 1
+
+    stim.draw()
+    win.callOnFlip(ns.send_event, event_type='stm+')
+    win.flip()
+    frame += 1
+
+``example5_psychopy_photocell_drift.py`` does this by default and logs the
+measured refresh, the frame period, and each trial's ``onset_frame``.
+``--clock-timing`` restores the old behaviour for comparison. In
+simulation against a 60.00043 Hz display, clock timing reproduces the
+sawtooth exactly — onset lateness sweeping a full frame, standard
+deviation 4.6 ms — while frame counting holds it flat.
+
+What it costs
+^^^^^^^^^^^^^
+
+Two trade-offs worth accepting knowingly.
+
+**Your interval is no longer exactly nominal.** 180 frames at 16.6665 ms
+is 2.99997 s, not 3.000 s. A schedule 30 microseconds off nominal but
+perfectly stable is almost always better than one that is exactly nominal
+and occasionally a whole frame wrong.
+
+**Dropped frames accumulate.** A ``flip()`` that spans two refreshes still
+counts as one, so the schedule slips permanently rather than
+self-correcting the way clock-based waiting does. If absolute schedule
+matters more to you than stimulus-to-stimulus consistency, that is a
+reason to prefer the clock — but for most designs consistency is what you
+want.
+
+.. note::
+
+   The association between the phase sweep and the one-frame step is
+   strong — matching magnitude, matching period — but the mechanism
+   linking them has not been isolated. ``win.flip()`` already blocks until
+   vsync, so something further down the presentation path has to be
+   involved. Frame counting removes the sweep for certain; whether that
+   removes the step is being tested. If your own logs show onset lateness
+   pinned flat but a one-frame step persisting, the cause is downstream of
+   the flip — the compositor, the photocell threshold, or the amplifier.
+
 Stimulus computer setup
 -----------------------
 
