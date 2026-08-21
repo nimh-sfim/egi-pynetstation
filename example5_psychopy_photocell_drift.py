@@ -208,6 +208,50 @@ def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
 QUIT_KEYS = ['escape', 'q', 'Q']
 
 
+def make_quit_checker():
+    """Return a callable reporting whether the operator asked to stop.
+
+    ``event.getKeys()`` reads pyglet's window event queue, which only
+    receives anything while the stimulus window holds operating-system
+    keyboard focus. On macOS a Python process launched from a terminal is
+    not a bundled foreground application, so the window often never
+    becomes the key window and every keystroke goes to the terminal
+    instead -- which is how the documented quit keys end up silently
+    doing nothing for a whole hour.
+
+    The PTB keyboard backend reads the HID layer directly and does not
+    depend on window focus, so prefer it. Both are polled, because the
+    PTB path needs Input Monitoring permission on macOS -- which a system
+    update can quietly revoke -- while the pyglet path still works
+    whenever the window does happen to have focus. Neither is reliable
+    alone on this platform; together they cover each other.
+    """
+    from psychopy import event
+
+    def poll_pyglet() -> bool:
+        return bool(event.getKeys(keyList=QUIT_KEYS))
+
+    try:
+        from psychopy.hardware import keyboard
+        device = keyboard.Keyboard()
+    except Exception as err:
+        # Not fatal: the run is still perfectly valid, the operator just
+        # has one fewer way to stop it. Say so rather than leaving them
+        # to discover it by pressing q and being ignored.
+        print(
+            f'Note: PTB keyboard unavailable ({type(err).__name__}: {err}); '
+            'quit keys need the stimulus window to have focus.'
+        )
+        return poll_pyglet
+
+    def poll_both() -> bool:
+        if device.getKeys(keyList=QUIT_KEYS, waitRelease=False):
+            return True
+        return poll_pyglet()
+
+    return poll_both
+
+
 CSV_COLUMNS = [
     'trial',
     'phase',
@@ -505,7 +549,7 @@ def main(argv=None) -> int:
     win = None
 
     try:
-        from psychopy import core, event, visual
+        from psychopy import core, visual
 
         ns = NetStation(
             ip_cmd,
@@ -559,6 +603,7 @@ def main(argv=None) -> int:
             lineColor='white',
             edges=64,
         )
+        should_quit = make_quit_checker()
         isis = build_isi_sequence(args.duration)
         fps, frame_period, fps_source = measure_display(win, isis)
         timing_mode = 'clock' if args.clock_timing else 'frame'
@@ -646,12 +691,12 @@ def main(argv=None) -> int:
             # the presented frame slip by one over tens of minutes.
             if args.clock_timing:
                 while exp_clock.getTime() < next_onset:
-                    if event.getKeys(keyList=QUIT_KEYS):
+                    if should_quit():
                         raise KeyboardInterrupt
                     win.flip()
             else:
                 while state['frame'] < onset_frame - 1:
-                    if event.getKeys(keyList=QUIT_KEYS):
+                    if should_quit():
                         raise KeyboardInterrupt
                     win.flip()
                     state['frame'] += 1
@@ -711,7 +756,7 @@ def main(argv=None) -> int:
             if args.clock_timing:
                 dot_off = next_onset + args.dot_duration
                 while exp_clock.getTime() < dot_off:
-                    if event.getKeys(keyList=QUIT_KEYS):
+                    if should_quit():
                         raise KeyboardInterrupt
                     dot.draw()
                     win.flip()
