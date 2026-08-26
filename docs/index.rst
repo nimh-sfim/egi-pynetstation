@@ -1,83 +1,62 @@
-.. egi-pynetstation documentation master file, created by
-   sphinx-quickstart on Mon Nov 15 15:10:43 2021.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
 Welcome to egi-pynetstation's documentation!
 ============================================
 
-egi-pynetstation is designed to help users of the EGI MRI-compatible EEG
-system to perform high-resolution event marking with a small Python API.
+``egi-pynetstation`` is a Python interface for sending ECI commands and
+event markers to EGI Net Station / Amp Server Pro, designed for
+high-resolution event marking from a small API.
 
+A single ECI ``NTPClockSync`` establishes the event timestamp epoch, and
+client-side drift correction then compensates for the slow clock drift
+between the stimulus computer and the amplifier's NTP server.
+
+Validated over one-hour continuous recordings against a photocell: the
+marker-to-photocell offset held to a standard deviation of **0.94 ms**
+with a residual trend of **+0.49 ms/hour**, across a run in which the
+operating system stepped the system clock by 256 ms.
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
+   installation
+   quickstart
+   psychopy
+   drift
+   diagnostics
+   examples
+   api
+   legacy
 
-Installation
-============
-
-**Option 1**: To install this package, you can pull it from pyPI via
-
-.. code-block:: bash
-
-    pip install egi-pynetstation
-
-**Option 2**: If you would like the latest version on GitHub, you can execute the
-following from:
-
-.. code-block:: bash
-
-    git clone https://github.com/nimh-sfim/egi-pynetstation.git
-    cd egi-pynetstation
-    pip install .
-
-It should be installed into the environment you're currently in.
-
-**Option 3**: We are also happy to have partnered with `PsychoPy <https://psychopy.org>`_, 
-which now includes egi-pynetstation in the standalone package without further
-downloads or steps.
-
-
-Examples
-========
-
-Currently, there is only one supported way to use the NetStation interface.
-This involves the use of "Network Time Protocol" or NTP.
-In the future we will support the "simple" clock option that EGI provides.
-A full showcase can be found in our ``example.py`` file on GitHub, found
-`here <https://github.com/nimh-sfim/egi-pynetstation/blob/main/example.py>`_.
-
-You will always need to execute commands in the following order:
+The short version
+-----------------
 
 .. code-block:: python
 
     from egi_pynetstation import NetStation
-    # Set an IP address for the computer running NetStation as an IPv4 string
-    IP_ns = '10.10.10.42'
-    # Set a port that NetStation will be listening to as an integer
-    port_ns = 55513
-    ns = NetStation(IP_ns, port_ns)
-    # Set an NTP clock server (the amplifier) address as an IPv4 string
-    IP_amp = '10.10.10.51'
-    ns.connect(ntp_ip=IP_amp)
-    # Do whatever setup for your experiment here...
-    # Begin recording
+
+    ns = NetStation('10.10.10.42', 55513)
+    ns.connect(ntp_ip='10.10.10.51')   # drift sampling starts on its own thread
     ns.begin_rec()
-    # You can now send events; this one just says "HIYA" and automatically
-    # marks the time for you
-    ns.send_event(event_type="HIYA")
-    # You can include a data dictionary; perhaps you have a dog stimulus
-    my_data = {"dogs": "fido"}
-    # Send this data with the event type of "STIM"
-    ns.send_event(event_type="STIM", data=my_data)
-    # Occasionally good to resync with clock - maybe after each trial
-    ns.resync()
-    # With the experiment concluded, you can end the recording
+
+    # In a visual experiment, mark the flip that shows the stimulus.
+    win.callOnFlip(ns.send_event, event_type='stm+')
+    win.flip()
+
     ns.end_rec()
-    # You'll want to disconnect the amplifier when your program is done
     ns.disconnect()
+
+Three things are worth knowing before you write anything else:
+
+1. **Drift correction is on by default, and so is sampling for it** — a
+   background thread takes NTP samples on its own, so there is nothing to
+   wire up. Advanced use cases can take over sampling manually instead;
+   see :doc:`drift`.
+2. **Send events from the flip callback.**
+   :meth:`~egi_pynetstation.NetStation.NetStation.send_event` never
+   blocks, so it is safe there. See :doc:`psychopy`.
+3. **Do not re-sync the ECI clock during a recording.** One sync included in
+   ``begin_rec()`` is correct; repeated syncs reset the timestamp epoch and
+   are refused unless ``force=True`` is passed for diagnostics.
 
 Indices and tables
 ==================

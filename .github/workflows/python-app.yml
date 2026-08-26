@@ -1,5 +1,6 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+# Tests the Python range the package actually declares support for, not a
+# single version. pyproject.toml and eci_env.yml are kept in step with the
+# matrix below; test_version.py asserts the metadata files agree.
 
 name: Python application
 
@@ -9,17 +10,36 @@ on:
   pull_request:
     branches: [ main ]
 
-jobs:
-  build:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
-    runs-on: ubuntu-latest
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared minimum, the versions PsychoPy ships, and the
+        # newest supported release.
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+        include:
+          # Timing behaviour differs most on Windows, and the drift
+          # corrector's clock-resolution assumptions are documented
+          # against it, so cover the newest version there too.
+          - python-version: "3.13"
+            os: windows-latest
+          - python-version: "3.13"
+            os: macos-latest
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v2
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
+        python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -27,18 +47,83 @@ jobs:
         pip install .
     - name: Lint with flake8
       run: |
-        # stop the build if there are Python syntax errors or undefined names
+        # Syntax errors and undefined names always fail the build.
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # Lint with the following exceptions
-        # - F403: import *
-        # - F405: import *
-        # - W504: whitespace after binary operator (I prefer having the whitespace)
-        flake8 eci --count --exit-zero --statistics --ignore=F403,F405,W504 --max-line-length=120
+        # Style pass. No --exit-zero: this is expected to protect the
+        # branch, and a check that cannot fail is not a check.
+        # - F403/F405: this package uses `import *` from .exceptions
+        # - W503/W504: mutually exclusive rules; only one can be satisfied
+        flake8 egi_pynetstation --count --statistics --ignore=F403,F405,W503,W504 --max-line-length=120
     - name: Test with pytest
+      run: pytest egi_pynetstation/tests -v
+    - name: Check the clock-resolution reporter runs
+      # Shared CI runners are not stimulus computers and can be heavily
+      # loaded. Exercise the report without treating an unsuitable runner's
+      # diagnostic return value as a package failure; exceptions still fail.
+      run: python -c "from egi_pynetstation.check_clocks import run_report; run_report()"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - name: Install dependencies
       run: |
-        pytest
-    - name: Build readthedocs
+        python -m pip install --upgrade pip
+        pip install -r docs/requirements.txt
+        pip install .
+    - name: Build docs with warnings as errors
+      run: sphinx-build -b html -W --keep-going docs docs/_build/html
+    - name: Configure GitHub Pages
+      if: github.event_name == 'push'
+      uses: actions/configure-pages@v5
+    - name: Upload GitHub Pages artifact
+      if: github.event_name == 'push'
+      uses: actions/upload-pages-artifact@v4
+      with:
+        path: docs/_build/html
+
+  deploy-docs:
+    if: github.event_name == 'push'
+    needs: docs
+    runs-on: ubuntu-latest
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - name: Deploy documentation to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - name: Build wheel and sdist
       run: |
-        cd docs
-        pip install sphinx sphinx-rtd-theme
-        make html
+        python -m pip install --upgrade pip build twine
+        python -m build
+        twine check dist/*
+    - name: Install the built wheel and import it
+      run: |
+        python -m pip install dist/*.whl
+        # Run from a different directory so the repo tree cannot shadow
+        # the installed package -- the exact hazard the README warns
+        # about, and one that has bitten this project before.
+        cd /tmp && python -c "
+        import importlib, egi_pynetstation
+        # egi_pynetstation.NetStation is the re-exported *class*, so the
+        # module has to be fetched explicitly.
+        m = importlib.import_module('egi_pynetstation.NetStation')
+        print('imported', m.__file__, egi_pynetstation.__version__)
+        assert 'site-packages' in m.__file__, m.__file__
+        assert m.NetStation is egi_pynetstation.NetStation
+        "

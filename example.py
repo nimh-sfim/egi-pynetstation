@@ -46,14 +46,26 @@ def main():
     eci_client.begin_rec()
     eci_client.send_event(event_type="STRT", start=0.0)
 
+    # No periodic resync call here. Clock drift is corrected continuously
+    # by the package now -- a background thread samples NTP on its own, so
+    # nothing in the trial loop has to ask for it. The resync() that used
+    # to live here is an alias for sync_return_clock(), which can write
+    # real 'resy' markers into the recording; do not call it mid-run.
     for i in range(10):
         high_res_sleep(3)
         name = namer(i)
         eci_client.send_event(event_type=name)
-        if (i % 4) == 0:
-            eci_client.resync()
 
     eci_client.end_rec()
+
+    # send_event() does not block and so cannot report a failed send. Check
+    # once at the end: 'ok' is True only when drift correction engaged and
+    # is not stalled, NTP sampling is current, and nothing failed to send.
+    summary = eci_client.session_summary()
+    print('Session summary:', summary)
+    if not summary['ok']:
+        print('WARNING: check this session before analysing it.')
+
     eci_client.disconnect()
 
 

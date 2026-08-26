@@ -11,6 +11,10 @@ class Socket():
     """
     buffersize = 4096
     timeout = 1
+    # Applied to the connect() call itself. Without a separate value the
+    # OS default (over a minute on some platforms) governs how long an
+    # unreachable amplifier blocks before reporting failure.
+    connect_timeout = 5
 
     def __init__(self, address: str, port: int) -> None:
         """
@@ -34,8 +38,12 @@ class Socket():
         ------
         ConnectionRefusedError if the address is unavailable
         """
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.connect(self._address)
+        # create_connection() applies the timeout to the connect itself.
+        # Setting it afterwards, as this used to, left an unreachable host
+        # blocked on the operating system's own much longer default.
+        self._socket = socket.create_connection(
+            self._address, timeout=Socket.connect_timeout,
+        )
         self._socket.settimeout(Socket.timeout)
 
     def disconnect(self) -> None:
@@ -60,14 +68,23 @@ class Socket():
         SocketIncompleteTransmission if the full data is not transmitted
         """
         length_data = len(data)
-        length_transmitted = 0
         if not self._socket:
             self.connect()
-        length_transmitted = self._socket.send(data)
-        if length_transmitted != length_data:
-            raise SocketIncompleteTransmission(
-                length_transmitted, length_data
-            )
+        try:
+            # sendall(), not send(): a short write is legal on a stream
+            # socket, and send() used to leave the prefix of a command in
+            # the stream and carry on. Every later command would then be
+            # parsed by the server as a continuation of a truncated one.
+            self._socket.sendall(data)
+        except socket.timeout as err:
+            # A timeout mid-send means an unknown number of bytes landed,
+            # so the command framing is no longer known. Nothing sent
+            # afterwards can be trusted; close rather than continue.
+            self.disconnect()
+            raise SocketIncompleteTransmission(0, length_data) from err
+        except OSError:
+            self.disconnect()
+            raise
 
     def read(self) -> bytes:
         """
@@ -78,5 +95,10 @@ class Socket():
         The byte array from the socket
         """
         if not self._socket:
-            self._socket.connect()
+            # This used to be self._socket.connect(), which is an
+            # AttributeError on None -- the branch could never do what it
+            # was written to do.
+            raise SocketException(
+                'Attempted to read from a socket that is not connected'
+            )
         return self._socket.recv(Socket.buffersize)

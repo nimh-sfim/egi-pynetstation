@@ -5,4 +5,7 @@
 
 """
 
-__version__ = '1.0.0'
+from .NetStation import NetStation
+
+__version__ = '2.0.0'
+__all__ = ['NetStation']
