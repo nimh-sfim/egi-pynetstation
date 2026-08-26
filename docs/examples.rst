@@ -82,12 +82,32 @@ Marking a ``miss`` matters more than it looks. Without it, a timed-out
 trial has a stimulus onset with no matching response event, which makes
 epoching awkward later.
 
-Warming up the clock
-^^^^^^^^^^^^^^^^^^^^
+Warming up the clock (optional)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The 25 trials take only about two minutes, which is less than the
 180 seconds of evidence the drift model needs — so without help the
-correction would never engage at all.
+correction never engages during this particular run.
+
+That is not an argument against drift correction in general, and the
+numbers are worth stating precisely so it does not read as one. The
+**+0.49 ms/hour** figure on the front page is a *residual* — what was
+left over after a full hour of correction, not what correction removed.
+Measured separately, the correction itself has removed as much as
+**~3.7 ms/hour** on the NTP-visible channel, and one run showed a
+further **~13 ms/hour** of marker drift from a source outside that
+channel entirely (the Net Station host clock, which correction has no
+way to reach regardless of whether it is enabled). Left uncorrected for
+a full session, that is double-digit milliseconds an hour, accumulating
+for as long as the recording runs — enough to distort or wash out later
+ERP components. Keep drift correction on; it is the default and this
+example does not turn it off.
+
+What genuinely does not matter here is skipping the *warm-up*
+specifically, for *this* two-minute task: even a conservative 15 ms/hour
+uncorrected comes to about half a millisecond over two minutes. This
+section shows the warm-up pattern for a task long enough that the
+difference is worth having from trial 1, not for this one.
 
 ``warm_up_drift_model()`` collects those samples while the instructions
 are on screen, using time the experiment would spend anyway, and prints
@@ -99,12 +119,13 @@ whether correction engaged before trial 1:
 
 That does mean the instruction screen sits for about 195 seconds, with a
 countdown so it does not look frozen. Set ``WARMUP_SAMPLES = 0`` at the
-top of the file to skip it; timestamps remain correct, just uncorrected
-for drift.
+top of the file to skip it; timestamps remain correct either way, just
+uncorrected for drift until the model has enough of its own to engage on.
 
 The warm-up has to come after ``begin_rec()``, because ``sample_drift()``
 needs the NTP sync that ``begin_rec()`` performs. See
-:doc:`psychopy` for why a shorter window does not work.
+:doc:`psychopy` for why a shorter window does not work, if you are
+adapting this for a task long enough that it does.
 
 Photocell timing validation
 ---------------------------
@@ -120,14 +141,22 @@ a run validates what real experiments actually do.
       --fullscreen \
       --screen 1 \
       --duration 3600 \
-      --sample-interval 15 \
-      --drift-min-samples 13 \
-      --drift-min-span 180 \
-      --drift-max-delay 0.010 \
-      --drift-max-residual 0.003 \
-      --drift-window-minutes 15 \
       --log photocell.csv \
       --error-log photocell_errors.jsonl
+
+That is the whole command. Every drift setting is already at the value a
+validation run wants: background sampling, the model quality gates, and
+the sampling schedule are all on by default, so there is nothing to pass.
+Drop ``--screen 1`` if the stimulus display is your only one.
+
+Resist spelling the defaults out. Passing ``--drift-min-samples 13
+--drift-max-residual 0.003`` and the rest changes nothing today, but it
+pins those values to the version you copied them from, so a later release
+that improves a default cannot reach your experiment -- and nothing
+reports that it did not. Pass an option only when you are deliberately
+choosing something different. To record what a run actually used, log
+``ns.drift_settings()`` beside your data instead of encoding it in the
+command line.
 
 Press ``q`` or ``escape`` at any point to stop early; the CSV log is
 still written and the recording closed cleanly.

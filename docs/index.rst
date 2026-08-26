@@ -25,6 +25,7 @@ operating system stepped the system clock by 256 ms.
    diagnostics
    examples
    api
+   legacy
 
 The short version
 -----------------
