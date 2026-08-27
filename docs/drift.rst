@@ -208,8 +208,8 @@ How it works
 
 Three properties explain the settings.
 
-**Offsets are referenced to the monotonic clock.** ``ntplib`` reports its
-offset against the local *system* clock, but event timestamps ride the
+**Offsets are referenced to the monotonic clock.** NTP offset is measured
+against the local *system* clock, but event timestamps ride the
 *monotonic* clock. Those two diverge continuously, because the operating
 system's time daemon (``timed`` on macOS, ``w32time`` on Windows)
 disciplines the system clock. Each sample therefore records

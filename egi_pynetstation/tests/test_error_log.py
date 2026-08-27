@@ -606,8 +606,8 @@ def test_join_timeout_covers_a_full_burst_against_a_dead_server(
 ):
     """The join budget must exceed the worst-case burst duration.
 
-    ntplib defaults to a 5 s per-query timeout; with the default 4-query
-    burst that is ~20 s, against a join that used to be a flat 5 s. The
+    The NTP client defaults to a 5 s per-query timeout; with the default
+    4-query burst that is ~20 s, against a join that used to be a flat 5 s. The
     thread was then abandoned still running, and a later start could add
     a second sampler alongside it.
     """

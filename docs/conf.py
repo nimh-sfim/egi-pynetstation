@@ -51,8 +51,7 @@ autodoc_default_options = {
     'undoc-members': False,
     'show-inheritance': False,
 }
-# ntplib is the only third-party import and is not needed to read docstrings.
-autodoc_mock_imports = ['ntplib']
+autodoc_mock_imports = []
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),

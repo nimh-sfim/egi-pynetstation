@@ -16,12 +16,13 @@ import warnings
 from pathlib import Path
 from typing import Union
 
-from ntplib import system_to_ntp_time, NTPClient
-
 from .eci import (
     build_command, parse_response, frame_response, response_shape,
     allowed_endians,
     package_event,
+)
+from .egi_ntp import (
+    system_to_ntp_time, NTPClient, monotonic_time as ntp_monotonic_time,
 )
 from .socket_wrapper import Socket
 from .exceptions import *
@@ -140,6 +141,7 @@ class NetStation(object):
         self._syncepoch = None
         self._offset_mono = None
         self._sync_monotonic = None
+        self._sync_python_monotonic = None
         self._sync_system_time = None
         self._client_clock_start_ntp = None
         self._server_clock_start_ntp = None
@@ -155,7 +157,7 @@ class NetStation(object):
         self._drift_slew = 0.0002
         self._drift_samples_per_call = 4
         self._drift_sample_spacing = 0.05
-        # Per-query NTP timeout. ntplib defaults to 5 s, so a 4-query
+        # Per-query NTP timeout. The client default is 5 s, so a 4-query
         # burst against a dead server could block ~20 s -- longer than
         # anything waiting on the sampler thread expects to wait.
         self._ntp_timeout = 2.0
@@ -580,6 +582,7 @@ class NetStation(object):
             self._syncepoch = None
             self._sync_system_time = None
             self._sync_monotonic = None
+            self._sync_python_monotonic = None
             self._offset = None
             self._offset_mono = None
             self._client_clock_start_ntp = None
@@ -650,8 +653,17 @@ class NetStation(object):
             )
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
-        t = time.time()
-        monotonic_t = time.monotonic()
+        t = getattr(response, 'local_time', None)
+        if t is None:
+            t = time.time()
+        monotonic_t = getattr(response, 'monotonic_time', None)
+        if monotonic_t is None:
+            monotonic_t = ntp_monotonic_time()
+        python_monotonic_t = getattr(
+            response, 'python_monotonic_time', None
+        )
+        if python_monotonic_t is None:
+            python_monotonic_t = time.monotonic()
         ntp_t = system_to_ntp_time(t + response.offset)
         with self._io_lock:
             # Strict, and _ntpsynced is set only after the amplifier
@@ -671,6 +683,7 @@ class NetStation(object):
             self._syncepoch = t
             self._sync_system_time = t
             self._sync_monotonic = monotonic_t
+            self._sync_python_monotonic = python_monotonic_t
             self._client_clock_start_ntp = ntp_t
             self._record_ntp_drift_sample(
                 response,
@@ -807,17 +820,31 @@ class NetStation(object):
 
         See Also
         --------
-        time_at_monotonic : Convert a previously captured
-            ``time.monotonic()`` reading into an event timestamp. Prefer
-            that in a screen-flip callback: capture the raw monotonic
-            value on the critical path and convert it afterwards, so no
-            lock or model work happens near the flip.
+        capture_time : Capture the package's high-resolution clock.
+        time_at_capture : Convert a package clock reading into an event
+            timestamp.
         """
-        return self.time_at_monotonic(time.monotonic())
+        return self.time_at_capture(self.capture_time())
+
+    def capture_time(self):
+        """Capture the package's high-resolution monotonic clock."""
+        return ntp_monotonic_time()
+
+    @check_connected
+    def time_at_capture(self, captured_time: float):
+        """Convert a value from :meth:`capture_time` to an event timestamp."""
+        with self._clock_lock:
+            if self._syncepoch is None:
+                raise RuntimeError('getTime is unavailable before NTP sync')
+            if self._sync_monotonic is None:
+                return time.time() - self._syncepoch
+            return self._time_at_elapsed(
+                captured_time - self._sync_monotonic
+            )
 
     @check_connected
     def time_at_monotonic(self, monotonic_time: float):
-        """Return the event timestamp for a captured monotonic reading.
+        """Convert a standard ``time.monotonic()`` reading.
 
         Parameters
         ----------
@@ -826,29 +853,30 @@ class NetStation(object):
 
         Notes
         -----
-        This lets latency-critical code record ``time.monotonic()`` with no
-        locking and no drift-model work, then convert to a package
-        timestamp later, off the critical path. The resulting timestamp
-        describes the instant of capture, not the instant of conversion.
+        This compatibility method retains the original API. On Windows before
+        Python 3.13, use :meth:`capture_time` and :meth:`time_at_capture` for
+        the higher-resolution performance-counter clock.
         """
         with self._clock_lock:
             if self._syncepoch is None:
                 raise RuntimeError('getTime is unavailable before NTP sync')
-
-            if self._sync_monotonic is None:
+            sync_monotonic = self._sync_python_monotonic
+            if sync_monotonic is None:
+                sync_monotonic = self._sync_monotonic
+            if sync_monotonic is None:
                 return time.time() - self._syncepoch
+            return self._time_at_elapsed(monotonic_time - sync_monotonic)
 
-            # Use monotonic time for elapsed event timestamps so wall-clock
-            # adjustments on the stimulus computer do not create timestamp jumps.
-            elapsed = monotonic_time - self._sync_monotonic
-            if not self._drift_correction:
-                return elapsed
+    def _time_at_elapsed(self, elapsed: float):
+        """Apply the active drift model to elapsed package-clock time."""
+        if not self._drift_correction:
+            return elapsed
 
-            initial_offset = getattr(self, '_offset_mono', None)
-            predicted_offset = self._predict_ntp_offset(elapsed)
-            if initial_offset is None or predicted_offset is None:
-                return elapsed
-            return elapsed + (predicted_offset - initial_offset)
+        initial_offset = getattr(self, '_offset_mono', None)
+        predicted_offset = self._predict_ntp_offset(elapsed)
+        if initial_offset is None or predicted_offset is None:
+            return elapsed
+        return elapsed + (predicted_offset - initial_offset)
 
     @check_connected
     def disconnect(self) -> None:
@@ -1022,7 +1050,7 @@ class NetStation(object):
             # aligned with the stimulus -- before anything else. This call
             # is the one that may run in a flip callback, so it must not
             # touch a lock or the socket.
-            monotonic_at_call = time.monotonic()
+            monotonic_at_call = ntp_monotonic_time()
             self._ensure_event_sender()
             self._event_queue.put((
                 monotonic_at_call,
@@ -1117,7 +1145,7 @@ class NetStation(object):
                 monotonic_at_call, kwargs = item
                 try:
                     if kwargs.get('start') is None:
-                        kwargs['start'] = self.time_at_monotonic(
+                        kwargs['start'] = self.time_at_capture(
                             monotonic_at_call
                         )
                     self._send_event_now(**kwargs)
@@ -1260,7 +1288,7 @@ class NetStation(object):
 
             elapsed = None
             if self._sync_monotonic is not None:
-                elapsed = time.monotonic() - self._sync_monotonic
+                elapsed = ntp_monotonic_time() - self._sync_monotonic
 
             if estimate is None:
                 predicted = self._predict_active_ntp_offset(elapsed)
@@ -1543,7 +1571,7 @@ class NetStation(object):
                 return
             if self._sync_monotonic is None:
                 return
-            elapsed = time.monotonic() - self._sync_monotonic
+            elapsed = ntp_monotonic_time() - self._sync_monotonic
             expected = elapsed / self._auto_drift_interval
             actual = len(self._drift_history)
             if expected < 4 or actual >= expected * 0.25:
@@ -1701,7 +1729,7 @@ class NetStation(object):
             self._drift_model_dirty = True
             elapsed = None
             if self._sync_monotonic is not None:
-                elapsed = time.monotonic() - self._sync_monotonic
+                elapsed = ntp_monotonic_time() - self._sync_monotonic
             estimate = self._ntp_drift_regression()
             if estimate is not None:
                 self._activate_drift_model(estimate, elapsed)
@@ -2100,7 +2128,7 @@ class NetStation(object):
                     if self._drift_active_model is None
                     or self._sync_monotonic is None
                     else (
-                        time.monotonic() - self._sync_monotonic
+                        ntp_monotonic_time() - self._sync_monotonic
                         - self._drift_active_model['anchor_elapsed']
                     )
                 ),
@@ -2115,9 +2143,13 @@ class NetStation(object):
         burst: list = None,
     ) -> dict:
         if local_time is None:
-            local_time = time.time()
+            local_time = getattr(response, 'local_time', None)
+            if local_time is None:
+                local_time = time.time()
         if monotonic_time is None:
-            monotonic_time = time.monotonic()
+            monotonic_time = getattr(response, 'monotonic_time', None)
+            if monotonic_time is None:
+                monotonic_time = ntp_monotonic_time()
         elapsed = None
         if self._sync_monotonic is not None:
             elapsed = monotonic_time - self._sync_monotonic
@@ -2130,7 +2162,7 @@ class NetStation(object):
             'delay': response.delay,
             'tx_time': response.tx_time,
         }
-        # ntplib reports the offset against the local *system* clock, but
+        # NTP reports the offset against the local *system* clock, but
         # event timestamps are built on the *monotonic* clock. Those two
         # frames diverge whenever the OS time daemon disciplines the system
         # clock, and on macOS that happens continuously. Re-reference the
@@ -2189,7 +2221,7 @@ class NetStation(object):
         # the fit, and the fit is made of samples.
         elapsed = last.get('elapsed')
         if elapsed is None and self._sync_monotonic is not None:
-            elapsed = time.monotonic() - self._sync_monotonic
+            elapsed = ntp_monotonic_time() - self._sync_monotonic
         model_age = None
         if active is not None and elapsed is not None:
             model_age = elapsed - active['anchor_elapsed']
@@ -2386,7 +2418,7 @@ class NetStation(object):
         if elapsed is None:
             if self._sync_monotonic is None:
                 return getattr(self, '_offset_mono', None)
-            elapsed = time.monotonic() - self._sync_monotonic
+            elapsed = ntp_monotonic_time() - self._sync_monotonic
 
         estimate = self._ntp_drift_regression()
         if estimate is None:

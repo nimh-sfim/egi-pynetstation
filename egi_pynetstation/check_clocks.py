@@ -4,9 +4,9 @@
 """Report whether this machine's clocks are good enough for ECI timing.
 
 Run this on any stimulus computer before trusting drift-corrected event
-timestamps. The drift corrector assumes sub-millisecond resolution from
-both time.time() and time.monotonic(); several Windows/Python combinations
-provide ~15.6 ms instead, which silently degrades the correction.
+timestamps. The report shows both Python's standard clocks and the clocks
+actually selected by egi-pynetstation. On affected Windows/Python
+combinations, the latter bypass the ~15.6 ms standard clocks.
 
     python -m egi_pynetstation.check_clocks
     python -m egi_pynetstation.check_clocks --compare
@@ -34,6 +34,8 @@ import statistics
 import sys
 import time
 
+from .egi_ntp import monotonic_time, precise_system_time
+
 WINDOWS = platform.system() == 'Windows'
 
 
@@ -60,13 +62,14 @@ def sleep_accuracy(requested=0.05, trials=10):
     return statistics.mean(errors), max(errors)
 
 
-def skew_jitter(reads=2000):
+def skew_jitter(system_clock=precise_system_time,
+                monotonic_clock=monotonic_time, reads=2000):
     """Spread of (system clock - monotonic clock) over a burst of reads.
 
     This difference is what cancels OS clock discipline out of the drift
     model, so it has to be measurable at sub-millisecond scale.
     """
-    skews = [time.time() - time.monotonic() for _ in range(reads)]
+    skews = [system_clock() - monotonic_clock() for _ in range(reads)]
     return (max(skews) - min(skews)) * 1000.0
 
 
@@ -160,6 +163,11 @@ def run_comparison() -> int:
     baseline = sample_clocks()
     print(format_row('as launched', baseline,
                      timer[2] if timer else None))
+    package_clocks = {
+        'wall': measured_resolution(precise_system_time),
+        'monotonic': measured_resolution(monotonic_time),
+    }
+    print(format_row('egi-pynetstation', package_clocks))
 
     try:
         import psychopy  # noqa: F401
@@ -200,8 +208,9 @@ def run_comparison() -> int:
         print('Clocks are already sub-millisecond as launched. Nothing to do.')
         return 0
 
-    print('Clocks are COARSE as launched, so drift correction will carry '
-          'several\nmilliseconds of error. Findings:')
+    print('Python standard clocks are COARSE as launched. '
+          'egi-pynetstation uses\nthe separate clock row above, so this '
+          'does not degrade its event timing.\nFindings:')
     if after_psychopy is not None:
         if coarse(after_psychopy):
             print('  - Importing PsychoPy did NOT improve them. PsychoPy '
@@ -213,7 +222,10 @@ def run_comparison() -> int:
         print('  - timeBeginPeriod(1) DID improve them. Call it at the start '
               'of your\n    experiment, or upgrade to Python 3.13+, which '
               'does not depend on\n    the timer tick at all.')
-    return 1
+    if coarse(package_clocks):
+        print('  - The egi-pynetstation clock row is also coarse.')
+        return 1
+    return 0
 
 
 def run_report() -> int:
@@ -222,6 +234,7 @@ def run_report() -> int:
     print()
 
     problems = []
+    diagnostics = []
 
     timer = windows_timer_resolution()
     if timer:
@@ -229,7 +242,7 @@ def run_report() -> int:
         print(f'windows timer tick : current={current:.3f} ms  '
               f'(finest {finest:.3f} ms)')
         if current > 2.0:
-            problems.append(
+            diagnostics.append(
                 f'the Windows timer tick is {current:.2f} ms; on Python '
                 f'< 3.13 this sets the resolution of time.time() and '
                 f'time.monotonic(). Call timeBeginPeriod(1) or upgrade '
@@ -246,8 +259,22 @@ def run_report() -> int:
               f'monotonic={info.monotonic}')
         # 15.6 ms is the classic Windows low-resolution timer tick.
         if actual is not None and actual > 1e-3:
-            problems.append(
+            diagnostics.append(
                 f'{name}() resolution is {actual * 1000:.2f} ms; '
+                f'direct users of this standard clock will be quantized'
+            )
+
+    print()
+    package_clocks = {
+        'wall': precise_system_time,
+        'monotonic': monotonic_time,
+    }
+    for name, func in package_clocks.items():
+        actual = measured_resolution(func)
+        print(f'egi {name:9} measured={actual:.3e} s')
+        if actual is not None and actual > 1e-3:
+            problems.append(
+                f'egi {name} clock resolution is {actual * 1000:.2f} ms; '
                 f'drift correction needs better than 1 ms'
             )
 
@@ -259,27 +286,24 @@ def run_report() -> int:
     # 15.6 ms Windows timer tick means sleep() is being rounded up to the
     # legacy timer resolution, which lengthens every NTP burst.
     if max_err > 12.0:
-        problems.append(
+        diagnostics.append(
             f'time.sleep() overshoots by up to {max_err:.1f} ms, near the '
             f'15.6 ms legacy Windows timer tick; NTP bursts will be slower '
             f'than requested'
         )
 
     spread = skew_jitter()
-    print(f'system-monotonic skew jitter over 2000 reads: {spread:.4f} ms')
+    print(f'egi wall-monotonic skew jitter over 2000 reads: {spread:.4f} ms')
     if spread > 1.0:
         problems.append(
-            f'system/monotonic skew jitters by {spread:.2f} ms; '
+            f'egi wall/monotonic skew jitters by {spread:.2f} ms; '
             f'OS clock-discipline cancellation will be noisy'
         )
 
-    print()
-    if sys.version_info < (3, 13) and WINDOWS:
-        problems.append(
-            'Python < 3.13 on Windows: time.time() and time.monotonic() '
-            'are updated on the system timer tick. Upgrade to 3.13 or '
-            'newer, or run --compare to see what raising the tick would buy'
-        )
+    if diagnostics:
+        print('\nSTANDARD-CLOCK DIAGNOSTICS:')
+        for item in diagnostics:
+            print(f'  - {item}')
 
     if problems:
         print('PROBLEMS FOUND:')
@@ -289,7 +313,8 @@ def run_report() -> int:
             print('\nRun with --compare to attribute this to a specific '
                   'cause.')
         return 1
-    print('Clocks look suitable for drift-corrected ECI timing.')
+    print('egi-pynetstation clocks look suitable for drift-corrected ECI '
+          'timing.')
     return 0
 
 

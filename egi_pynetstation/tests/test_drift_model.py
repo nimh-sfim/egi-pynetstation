@@ -225,7 +225,7 @@ def test_rejected_fits_are_counted_and_explained():
 def test_os_clock_discipline_does_not_reach_event_timestamps():
     """An OS time daemon adjusting the system clock must not move timestamps.
 
-    ntplib reports offsets against the system clock, but event timestamps
+    NTP reports offsets against the system clock, but event timestamps
     ride the monotonic clock. In the hour4 recording, macOS slewed the
     system clock by about -16 ms mid-run; because the drift model compared
     frames, that adjustment showed up as a bogus 30 ms/hour rate change and
@@ -264,7 +264,8 @@ def test_refresh_drift_model_forces_cached_model_to_refit(monkeypatch):
     ns = make_station()
     ns.set_drift_requirements(min_samples=2, min_span=1.0)
     ns.set_drift_model_options(max_residual=0.010, window_minutes=0)
-    monkeypatch.setattr(netstation_module.time, 'monotonic', lambda: 1020.0)
+    monkeypatch.setattr(netstation_module, 'ntp_monotonic_time',
+                        lambda: 1020.0)
 
     add_drift_sample(ns, 0.0, 0.000)
     add_drift_sample(ns, 10.0, 0.010)

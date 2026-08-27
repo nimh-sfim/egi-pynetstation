@@ -56,17 +56,19 @@ difference. A healthy machine looks like this::
 
 .. note::
 
-   **On Windows, Python 3.13 or newer is strongly recommended.** Earlier
-   CPython versions used ``GetTickCount64()`` for ``time.monotonic()``
-   and ``GetSystemTimeAsFileTime()`` for ``time.time()``, both with
-   ~15.6 ms resolution.
+   Before Python 3.13, Windows CPython used ``GetTickCount64()`` for
+   ``time.monotonic()`` and ``GetSystemTimeAsFileTime()`` for
+   ``time.time()``, both with ~15.6 ms resolution.
 
-   That matters more than it first appears: ``ntplib`` computes its
-   offset from ``time.time()`` internally, so on an affected machine the
-   raw NTP measurement itself carries ~15.6 ms quantization (about
+   That matters more than it first appears: older NTP client code often
+   timestamps requests with ``time.time()``, so on an affected machine the
+   raw NTP measurement itself can carry ~15.6 ms quantization (about
    4.5 ms RMS). Simulated over an hour, that produces roughly **12 ms**
    of correction error and repeated fit rejections — the model still
-   engages, so it looks like it is working.
+   engages, so it looks like it is working. ``egi-pynetstation`` avoids
+   both coarse paths: its vendored NTP client uses the precise Windows
+   wall clock, and event timestamps use the performance counter. Use
+   ``ns.capture_time()`` when manually capturing a package timestamp.
 
    On pre-3.13 Python these two clocks are updated on the *system timer
    tick*, so the resolution you actually get depends on whether anything
@@ -74,9 +76,9 @@ difference. A healthy machine looks like this::
 
    .. warning::
 
-      **PsychoPy does not raise the Windows timer resolution.** Its only
-      Windows timing lever is ``rush()``, which sets thread and process
-      priority. Do not assume importing PsychoPy fixes this.
+      **PsychoPy does not raise the Windows timer resolution.** Its own
+      direct uses of the standard clocks can therefore remain coarse even
+      though ``egi-pynetstation`` uses its precise clock paths.
 
    .. note::
 

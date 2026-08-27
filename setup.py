@@ -27,9 +27,7 @@ setuptools.setup(
         'Operating System :: OS Independent',
     ],
     packages=setuptools.find_packages(),
-    install_requires=[
-        'ntplib>=0.4.0',
-    ],
+    install_requires=[],
     extras_require={
         'dev': [
             'sphinx',

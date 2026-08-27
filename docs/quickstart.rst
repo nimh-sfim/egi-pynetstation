@@ -79,11 +79,9 @@ reading you captured earlier:
 
 .. code-block:: python
 
-    import time
-
-    captured = time.monotonic()          # e.g. inside a flip callback
+    captured = ns.capture_time()          # e.g. inside a flip callback
     # ... later, off the critical path ...
-    start = ns.time_at_monotonic(captured)
+    start = ns.time_at_capture(captured)
     ns.send_event(start=start, event_type='stm+')
 
 .. important::

@@ -49,10 +49,11 @@ python -c "import importlib; m = importlib.import_module('egi_pynetstation.NetSt
 
 ### Check Your Clocks First
 
-The drift corrector assumes sub-millisecond resolution from both
-`time.time()` and `time.monotonic()`. Some Python and Windows combinations
-provide roughly 15.6 ms instead, which degrades timing silently rather than
-raising an error. Run this once on any new stimulus computer:
+Some Python and Windows combinations provide roughly 15.6 ms resolution from
+`time.time()` and `time.monotonic()`. The package bypasses those clocks on
+affected Windows versions, but the diagnostic still reports both the standard
+clocks and the clocks actually used for EGI timing. Run it once on any new
+stimulus computer:
 
 ```bash
 python -m egi_pynetstation.check_clocks
@@ -61,9 +62,8 @@ python -m egi_pynetstation.check_clocks
 From a repository checkout, `python check_clocks.py` does the same thing.
 
 It reports measured resolution for each clock, `time.sleep()` overshoot, and
-the jitter in the system-versus-monotonic clock difference. On Windows,
-Python 3.13 or newer is strongly recommended: earlier versions used
-low-resolution timers for both `time.time()` and `time.monotonic()`.
+the jitter in the wall-versus-monotonic clock difference. Its final verdict is
+based on the clocks selected by `egi-pynetstation`.
 
 ## Basic Use
 
@@ -200,7 +200,8 @@ ns.send_event(..., wait=True)         # block and return the ECI response
 ns.flush_events(timeout=None)         # block until the queue drains
 ns.pending_events()                   # how many are still queued
 ns.getTime()                          # timestamp for right now
-ns.time_at_monotonic(monotonic_time)  # timestamp for a captured reading
+captured = ns.capture_time()           # high-resolution monotonic reading
+ns.time_at_capture(captured)           # timestamp for that reading
 
 # Drift sampling
 ns.sample_drift(samples=None, spacing=None)

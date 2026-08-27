@@ -332,7 +332,8 @@ Default setup at a glance
 Why this is safe in a flip callback
 -----------------------------------
 
-``send_event()`` captures ``time.monotonic()`` on the calling thread —
+``send_event()`` captures the package's high-resolution monotonic clock on
+the calling thread —
 the one aligned with your stimulus — puts the event on a queue, and
 returns. A background worker converts that reading into a
 drift-corrected timestamp and writes to the socket.
@@ -420,13 +421,11 @@ reading at the critical moment and convert it later:
 
 .. code-block:: python
 
-    import time
-
-    captured = time.monotonic()        # cheap: no locks, no model work
+    captured = ns.capture_time()       # cheap: no locks, no model work
     # ... after the frame has appeared ...
-    ns.send_event(start=ns.time_at_monotonic(captured), event_type='stm+')
+    ns.send_event(start=ns.time_at_capture(captured), event_type='stm+')
 
-:meth:`~egi_pynetstation.NetStation.NetStation.time_at_monotonic` returns
+:meth:`~egi_pynetstation.NetStation.NetStation.time_at_capture` returns
 the event timestamp for the instant of capture, not the instant of
 conversion.
 

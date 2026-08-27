@@ -725,7 +725,7 @@ def main(argv=None) -> int:
                 # send_event() straight from here -- that is the pattern
                 # this test exists to validate -- and time the call, since
                 # that span is what a real experiment pays at every onset.
-                span_start = time.monotonic()
+                span_start = ns.capture_time()
                 try:
                     result = ns.send_event(
                         event_type='stm+',
@@ -734,10 +734,10 @@ def main(argv=None) -> int:
                         wait=args.sync_events,
                     )
                 except Exception as err:
-                    span_end = time.monotonic()
+                    span_end = ns.capture_time()
                     rec['send_error'] = f'{type(err).__name__}: {err}'
                 else:
-                    span_end = time.monotonic()
+                    span_end = ns.capture_time()
                     if result is not None:
                         rec['send_result'] = repr(result)
                 rec['flip_monotonic_time'] = span_start
@@ -778,7 +778,7 @@ def main(argv=None) -> int:
 
             # Everything below here is off the critical path.
             if 'flip_monotonic_time' in record:
-                record['package_time'] = ns.time_at_monotonic(
+                record['package_time'] = ns.time_at_capture(
                     record['flip_monotonic_time']
                 )
             add_clock_diagnostics(record, ns)
