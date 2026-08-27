@@ -10,6 +10,7 @@ import json
 import logging
 import queue
 import socket
+import sys
 import threading
 import time
 import warnings
@@ -22,7 +23,10 @@ from .eci import (
     package_event,
 )
 from .egi_ntp import (
-    system_to_ntp_time, NTPClient, monotonic_time as ntp_monotonic_time,
+    system_to_ntp_time, NTPClient,
+    clock_report as ntp_clock_report,
+    check_clock_resolution as check_ntp_clock_resolution,
+    monotonic_time as ntp_monotonic_time,
 )
 from .socket_wrapper import Socket
 from .exceptions import *
@@ -34,6 +38,33 @@ logger = logging.getLogger(__name__)
 # Drift slopes are carried internally as seconds of offset change per
 # second of elapsed time. Everything human-facing wants ms/hour.
 MS_PER_HOUR = 1000.0 * 3600.0
+
+
+# time.monotonic() is GetTickCount64 on Windows before Python 3.13, which
+# advances in ~15.6 ms steps. A caller's reading is quantised before the
+# package ever sees it, so time_at_monotonic() cannot repair it -- warn once
+# rather than on every event.
+_COARSE_MONOTONIC = (
+    sys.platform == 'win32' and sys.version_info < (3, 13)
+)
+_warned_coarse_monotonic = False
+
+
+def _warn_coarse_monotonic():
+    """Warn the first time a coarse time.monotonic() reading is converted."""
+    global _warned_coarse_monotonic
+    if not _COARSE_MONOTONIC or _warned_coarse_monotonic:
+        return
+    _warned_coarse_monotonic = True
+    warnings.warn(
+        'time_at_monotonic() is deprecated and cannot be accurate on '
+        'Windows before Python 3.13: time.monotonic() advances in ~15.6 ms '
+        'steps there, so the reading passed in was already quantised. '
+        'Capture with NetStation.capture_time() and convert with '
+        'time_at_capture() instead.',
+        FutureWarning,
+        stacklevel=3,
+    )
 
 
 def slope_ms_per_hour(slope):
@@ -141,13 +172,19 @@ class NetStation(object):
         self._syncepoch = None
         self._offset_mono = None
         self._sync_monotonic = None
-        self._sync_python_monotonic = None
+        # Skew from time.monotonic() into the package capture clock, so the
+        # deprecated time_at_monotonic() can be a shim rather than a second
+        # implementation. Everything else knows about one frame only.
+        self._capture_minus_monotonic = None
         self._sync_system_time = None
         self._client_clock_start_ntp = None
         self._server_clock_start_ntp = None
         self._clock_start_history = []
         self._drift_history = []
         self._drift_correction = True
+        # A long baseline protects the slope estimate, independently of how
+        # precise each individual clock reading is. Keep these conservative
+        # until shorter windows have been validated on both Windows and macOS.
         self._drift_min_samples = 13
         self._drift_min_span = 180.0
         self._drift_max_delay = 0.010
@@ -560,6 +597,7 @@ class NetStation(object):
             'drift_samples_per_call': self._drift_samples_per_call,
             'drift_slew': self._drift_slew,
             'drift_max_model_age': self._drift_max_model_age,
+            'clocks': self._check_clock_resolution(),
             'clock': None,
         })
         if handshake:
@@ -582,7 +620,7 @@ class NetStation(object):
             self._syncepoch = None
             self._sync_system_time = None
             self._sync_monotonic = None
-            self._sync_python_monotonic = None
+            self._capture_minus_monotonic = None
             self._offset = None
             self._offset_mono = None
             self._client_clock_start_ntp = None
@@ -653,17 +691,16 @@ class NetStation(object):
             )
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
-        t = getattr(response, 'local_time', None)
-        if t is None:
-            t = time.time()
-        monotonic_t = getattr(response, 'monotonic_time', None)
-        if monotonic_t is None:
-            monotonic_t = ntp_monotonic_time()
-        python_monotonic_t = getattr(
-            response, 'python_monotonic_time', None
-        )
-        if python_monotonic_t is None:
-            python_monotonic_t = time.monotonic()
+        # No getattr() fallback to time.time()/time.monotonic() here. The
+        # NTP client is vendored, so request() always attaches these; a
+        # fallback could only fire for a foreign stats object, and would
+        # then substitute a clock reading taken at the wrong instant, in a
+        # possibly different frame, into the offset that anchors the whole
+        # recording. That is the failure this module exists to prevent, so
+        # let it raise instead.
+        t = response.local_time
+        monotonic_t = response.monotonic_time
+        python_monotonic_t = response.python_monotonic_time
         ntp_t = system_to_ntp_time(t + response.offset)
         with self._io_lock:
             # Strict, and _ntpsynced is set only after the amplifier
@@ -683,7 +720,7 @@ class NetStation(object):
             self._syncepoch = t
             self._sync_system_time = t
             self._sync_monotonic = monotonic_t
-            self._sync_python_monotonic = python_monotonic_t
+            self._capture_minus_monotonic = monotonic_t - python_monotonic_t
             self._client_clock_start_ntp = ntp_t
             self._record_ntp_drift_sample(
                 response,
@@ -837,7 +874,9 @@ class NetStation(object):
             if self._syncepoch is None:
                 raise RuntimeError('getTime is unavailable before NTP sync')
             if self._sync_monotonic is None:
-                return time.time() - self._syncepoch
+                raise RuntimeError(
+                    'capture clock anchor is unavailable after NTP sync'
+                )
             return self._time_at_elapsed(
                 captured_time - self._sync_monotonic
             )
@@ -846,6 +885,10 @@ class NetStation(object):
     def time_at_monotonic(self, monotonic_time: float):
         """Convert a standard ``time.monotonic()`` reading.
 
+        .. deprecated:: 2.1
+            Use :meth:`capture_time` with :meth:`time_at_capture`. This
+            method will be removed in 3.0.
+
         Parameters
         ----------
         monotonic_time:
@@ -853,19 +896,22 @@ class NetStation(object):
 
         Notes
         -----
-        This compatibility method retains the original API. On Windows before
-        Python 3.13, use :meth:`capture_time` and :meth:`time_at_capture` for
-        the higher-resolution performance-counter clock.
+        Kept for the v2.0.0 API. On Windows before Python 3.13 this method
+        *cannot* be made accurate: ``time.monotonic()`` is ``GetTickCount64``
+        there, so the caller's reading was already quantised to a 15.6 ms
+        tick before this method saw it. Nothing downstream can recover the
+        lost precision, which is why the first use on that platform warns.
         """
+        _warn_coarse_monotonic()
         with self._clock_lock:
             if self._syncepoch is None:
                 raise RuntimeError('getTime is unavailable before NTP sync')
-            sync_monotonic = self._sync_python_monotonic
-            if sync_monotonic is None:
-                sync_monotonic = self._sync_monotonic
-            if sync_monotonic is None:
-                return time.time() - self._syncepoch
-            return self._time_at_elapsed(monotonic_time - sync_monotonic)
+            skew = self._capture_minus_monotonic
+        if skew is None:
+            raise RuntimeError(
+                'time.monotonic compatibility anchor is unavailable'
+            )
+        return self.time_at_capture(monotonic_time + skew)
 
     def _time_at_elapsed(self, elapsed: float):
         """Apply the active drift model to elapsed package-clock time."""
@@ -1730,9 +1776,9 @@ class NetStation(object):
             elapsed = None
             if self._sync_monotonic is not None:
                 elapsed = ntp_monotonic_time() - self._sync_monotonic
-            estimate = self._ntp_drift_regression()
-            if estimate is not None:
-                self._activate_drift_model(estimate, elapsed)
+            estimate = self._ntp_drift_regression(
+                activation_elapsed=elapsed
+            )
             report = self.drift_estimate()
         self._flush_pending_log_records()
         return report
@@ -2077,6 +2123,19 @@ class NetStation(object):
                 'auto_drift_background': self._auto_drift_background,
             }
 
+    @staticmethod
+    def clock_report() -> dict:
+        """Describe the clocks used by the vendored NTP implementation."""
+        report = ntp_clock_report()
+        report['coarse_monotonic_platform'] = _COARSE_MONOTONIC
+        return report
+
+    def _check_clock_resolution(self) -> dict:
+        """Log the clock report, and warn loudly if the clock is too coarse."""
+        report = check_ntp_clock_resolution()
+        report['coarse_monotonic_platform'] = _COARSE_MONOTONIC
+        return report
+
     def clock_state(self) -> dict:
         """Return current client/server clock synchronization state."""
         health = self._ntp_sampling_health()
@@ -2142,14 +2201,13 @@ class NetStation(object):
         monotonic_time: float = None,
         burst: list = None,
     ) -> dict:
+        # As in ntpsync(): the vendored client always attaches these, and
+        # silently substituting a differently-framed reading would corrupt
+        # the drift fit rather than fail visibly.
         if local_time is None:
-            local_time = getattr(response, 'local_time', None)
-            if local_time is None:
-                local_time = time.time()
+            local_time = response.local_time
         if monotonic_time is None:
-            monotonic_time = getattr(response, 'monotonic_time', None)
-            if monotonic_time is None:
-                monotonic_time = ntp_monotonic_time()
+            monotonic_time = response.monotonic_time
         elapsed = None
         if self._sync_monotonic is not None:
             elapsed = monotonic_time - self._sync_monotonic
@@ -2196,7 +2254,7 @@ class NetStation(object):
         self._ntp_drift_regression()
         return dict(sample)
 
-    def _ntp_drift_regression(self):
+    def _ntp_drift_regression(self, activation_elapsed: float = None):
         if not self._drift_model_dirty:
             return self._drift_model
 
@@ -2205,7 +2263,14 @@ class NetStation(object):
         # record reads drift state, and any path back into this method
         # would otherwise refit and recurse without end.
         self._drift_model_dirty = False
-        self._note_drift_transition(self._drift_model)
+        activated = False
+        if self._drift_model is not None:
+            if activation_elapsed is None and self._drift_history:
+                activation_elapsed = self._drift_history[-1].get('elapsed')
+            activated = self._activate_drift_model(
+                self._drift_model, activation_elapsed
+            )
+        self._note_drift_transition(self._drift_model, activated=activated)
         return self._drift_model
 
     def _drift_transition_context(self) -> dict:
@@ -2247,7 +2312,7 @@ class NetStation(object):
             'last_sample_delay': last.get('delay'),
         }
 
-    def _note_drift_transition(self, estimate) -> None:
+    def _note_drift_transition(self, estimate, activated=False) -> None:
         """Log when the drift model engages, stalls, or recovers.
 
         A stalled model is silent by construction: fits are refused, the
@@ -2277,7 +2342,7 @@ class NetStation(object):
             ))
             return
 
-        first_fit = self._drift_accepted_fits == 0
+        first_fit = activated and self._drift_accepted_fits == 1
         was_stalled = self._drift_stalled
         rejections = self._drift_consecutive_rejections
         self._drift_consecutive_rejections = 0
@@ -2420,13 +2485,12 @@ class NetStation(object):
                 return getattr(self, '_offset_mono', None)
             elapsed = ntp_monotonic_time() - self._sync_monotonic
 
-        estimate = self._ntp_drift_regression()
+        estimate = self._ntp_drift_regression(activation_elapsed=elapsed)
         if estimate is None:
             active_offset = self._predict_active_ntp_offset(elapsed)
             if active_offset is not None:
                 return active_offset
             return getattr(self, '_offset_mono', None)
-        self._activate_drift_model(estimate, elapsed)
         return self._predict_active_ntp_offset(elapsed)
 
     def _drift_model_id(self, estimate: dict):
@@ -2474,13 +2538,13 @@ class NetStation(object):
             retired
         )
 
-    def _activate_drift_model(self, estimate: dict, elapsed: float) -> None:
+    def _activate_drift_model(self, estimate: dict, elapsed: float) -> bool:
         model_id = self._drift_model_id(estimate)
         active = self._drift_active_model
         if active is not None and active.get('model_id') == model_id:
-            return
+            return False
         if elapsed is None:
-            return
+            return False
 
         # Continuity anchor: whatever the previous model predicts right now.
         # Activating a new fit never steps event timestamps.
@@ -2517,6 +2581,7 @@ class NetStation(object):
                 f'slope={slope_ms_per_hour(estimate["slope"]):.3f} ms/h '
                 f'level_error={error_ms:.3f} ms{reset}'
             )
+        return True
 
     def _update_server_clock_start(
         self,

@@ -118,6 +118,19 @@ def test_drift_model_updates_do_not_jump_predicted_offset():
     assert ns.drift_estimate()['active_slope'] is not None
 
 
+def test_an_accepted_fit_is_active_before_the_next_event_timestamp():
+    ns = make_station()
+    ns.set_drift_requirements(min_samples=2, min_span=1.0)
+    ns.set_drift_model_options(window_minutes=0)
+
+    add_drift_sample(ns, 0.0, 0.000)
+    add_drift_sample(ns, 10.0, 0.010)
+
+    assert ns._drift_active_model is not None
+    assert ns._drift_accepted_fits == 1
+    assert ns._drift_active_model['slope'] == 0.001
+
+
 def test_high_residual_drift_model_keeps_last_active_fit():
     ns = make_station()
     ns.set_drift_requirements(min_samples=2, min_span=1.0)

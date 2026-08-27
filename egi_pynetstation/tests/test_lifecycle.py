@@ -24,6 +24,8 @@ import types
 
 import pytest
 
+from egi_pynetstation import egi_ntp
+
 from egi_pynetstation.exceptions import (
     ECIFailure,
     ECINoRecordingDeviceFailure,
@@ -42,9 +44,22 @@ NetStation = netstation_module.NetStation
 
 
 class FakeResponse:
+    """Stands in for NTPStats, including the clock readings it carries.
+
+    The vendored client always attaches local_time/monotonic_time/
+    python_monotonic_time, and NetStation now relies on that rather than
+    falling back to a differently-framed clock read, so the fake has to
+    carry them too.
+    """
+
     offset = 0.0
     delay = 0.002
     tx_time = 0.0
+
+    def __init__(self):
+        self.local_time = time.time()
+        self.monotonic_time = egi_ntp.monotonic_time()
+        self.python_monotonic_time = time.monotonic()
 
 
 def make_connected(monkeypatch, reply=b'Z', strict_eci=None):

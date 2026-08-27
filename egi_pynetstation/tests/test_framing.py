@@ -21,9 +21,12 @@ here as a regression test:
 """
 
 import importlib
+import time
 import types
 
 import pytest
+
+from egi_pynetstation import egi_ntp
 
 from egi_pynetstation.eci import (
     RESPONSE_IDENTIFY,
@@ -246,6 +249,9 @@ def test_buffer_does_not_leak_between_connections(monkeypatch):
         lambda: types.SimpleNamespace(
             request=lambda *a, **k: types.SimpleNamespace(
                 offset=0.0, delay=0.002, tx_time=0.0,
+                local_time=time.time(),
+                monotonic_time=egi_ntp.monotonic_time(),
+                python_monotonic_time=time.monotonic(),
             ),
         ),
     )

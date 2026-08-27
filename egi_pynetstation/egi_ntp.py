@@ -29,16 +29,21 @@
 
 The packet implementation and public helper API are retained from ntplib so
 the module remains easy to compare with upstream. The EGI changes are limited
-to the local clock readings in :meth:`NTPClient.request`:
+to the clock handling and validation in :meth:`NTPClient.request`:
 
 * Windows wall-clock timestamps use ``GetSystemTimePreciseAsFileTime`` instead
   of the pre-Python-3.13 ``time.time()`` implementation.
-* Windows elapsed-time readings use ``time.perf_counter()`` instead of the
-  pre-Python-3.13 ``time.monotonic()`` implementation.
+* Elapsed-time readings use ``time.perf_counter()`` on every platform
+  instead of ``time.monotonic()``, whose pre-Python-3.13 Windows
+  implementation ticks at 15.6 ms.
 * The receive-side wall and monotonic readings are attached to ``NTPStats`` so
   NetStation can place the NTP offset in the same clock frame as events.
+* Replies with an invalid mode, clock state, stratum, or originate timestamp
+  are rejected before they can anchor a recording.
 
-On other platforms the clock functions are the same ones ntplib uses.
+On macOS and Linux ``perf_counter()`` and ``monotonic()`` share an
+implementation, so the only behavioural change off Windows is that the
+package now exercises one clock path everywhere.
 """
 
 import datetime
@@ -47,6 +52,7 @@ import socket
 import struct
 import sys
 import time
+import warnings
 
 
 class NTPException(Exception):
@@ -132,20 +138,128 @@ NTP_DELTA = NTP.NTP_DELTA
 """Seconds between the NTP and system epochs."""
 
 WINDOWS = sys.platform == 'win32'
+COARSE_CLOCK_THRESHOLD = 0.001
 
 
 def precise_system_time():
-    """Return the wall clock used to timestamp local NTP packet I/O."""
+    """Return the wall clock used to timestamp local NTP packet I/O.
+
+    This one *must* branch. ``GetSystemTimePreciseAsFileTime`` has no POSIX
+    counterpart, and it does not need one: ``time.time()`` is already
+    ``clock_gettime(CLOCK_REALTIME)`` at microsecond resolution on macOS and
+    Linux. Only Windows before Python 3.13 reads a 15.6 ms system tick here.
+    """
     if not WINDOWS:
         return time.time()
     return _windows_precise_system_time()
 
 
 def monotonic_time():
-    """Return the monotonic clock used for EGI elapsed-time coordinates."""
-    if WINDOWS:
-        return time.perf_counter()
-    return time.monotonic()
+    """Return the monotonic clock used for EGI elapsed-time coordinates.
+
+    Deliberately unbranched. On macOS and Linux CPython builds
+    ``perf_counter()`` and ``monotonic()`` from the same underlying source
+    (``mach_absolute_time()`` and ``clock_gettime(CLOCK_MONOTONIC)``
+    respectively), so this is a no-op there -- but it means the clock the
+    package uses on Windows is also the clock every test exercises on a
+    developer machine. A Windows-only clock path is a path that only gets
+    tested on the rig, which is how a 15.6 ms tick reaches a recording.
+
+    The epoch of ``perf_counter()`` is unspecified and differs from that of
+    ``time.monotonic()``, so readings from the two cannot be mixed. Only
+    differences against :attr:`NetStation._sync_monotonic` are ever taken.
+    """
+    return time.perf_counter()
+
+
+def clock_resolution(clock=monotonic_time, limit=0.05, samples=5):
+    """Measure the effective resolution of ``clock`` in seconds.
+
+    ``time.get_clock_info()`` reports what CPython believes it configured,
+    which on Windows before 3.13 is not what a coarse system tick actually
+    delivers. This collects several positive transitions and returns the
+    smallest observed step, so an ordinary scheduling delay is less likely
+    to be mistaken for the clock resolution. A 15.6 ms tick is visible as
+    15.6 ms rather than as a claim of nanoseconds. Returns ``None`` if
+    nothing changed within ``limit`` seconds, which is itself a diagnosis.
+    """
+    if samples < 1:
+        raise ValueError('samples must be at least 1')
+
+    previous = clock()
+    steps = []
+    deadline = time.perf_counter() + limit
+    while time.perf_counter() < deadline:
+        current = clock()
+        step = current - previous
+        if step > 0:
+            steps.append(step)
+            previous = current
+            if len(steps) >= samples:
+                break
+        elif step < 0:
+            # A wall clock can be disciplined while this diagnostic runs.
+            # Reset the comparison point rather than reporting a negative
+            # resolution or waiting for it to catch up.
+            previous = current
+    return min(steps) if steps else None
+
+
+def clock_report():
+    """Describe the clocks this process will actually use."""
+    report = {
+        'platform': sys.platform,
+        'python_version': sys.version.split()[0],
+        'capture_clock': 'perf_counter',
+        'measured_capture_resolution': clock_resolution(),
+        'measured_system_resolution': clock_resolution(precise_system_time),
+    }
+    for name in ('perf_counter', 'monotonic', 'time'):
+        try:
+            info = time.get_clock_info(name)
+        except Exception as err:
+            report[f'{name}_info_error'] = f'{type(err).__name__}: {err}'
+            continue
+        report[f'{name}_implementation'] = info.implementation
+        report[f'{name}_reported_resolution'] = info.resolution
+    for name in ('capture', 'system'):
+        measured = report[f'measured_{name}_resolution']
+        report[f'{name}_clock_ok'] = (
+            measured is not None and measured <= COARSE_CLOCK_THRESHOLD
+        )
+    report['clocks_ok'] = (
+        report['capture_clock_ok'] and report['system_clock_ok']
+    )
+    return report
+
+
+def check_clock_resolution():
+    """Return a clock report and warn if either timing clock is too coarse."""
+    report = clock_report()
+    bad_clocks = [
+        name for name in ('capture', 'system')
+        if not report[f'{name}_clock_ok']
+    ]
+    if not bad_clocks:
+        return report
+
+    details = []
+    for name in bad_clocks:
+        measured = report[f'measured_{name}_resolution']
+        resolution = (
+            '>%.0f ms' % (COARSE_CLOCK_THRESHOLD * 1000)
+            if measured is None else '%.1f ms' % (measured * 1000)
+        )
+        details.append(f'{name}={resolution}')
+    message = (
+        'The measured clock resolution is too coarse for millisecond event '
+        'timing (' + ', '.join(details) + '). Event timestamps or NTP offsets '
+        'will be quantised and drift correction may never engage. On Windows '
+        'this usually means the precise clock path is not in use.'
+    )
+    report['warning'] = message
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    return report
 
 
 @functools.lru_cache(maxsize=1)
@@ -335,7 +449,10 @@ class NTPClient(object):
                 version=version,
                 tx_timestamp=system_to_ntp_time(tx_system),
             )
-            sock.sendto(query_packet.to_data(), sockaddr)
+            query_data = query_packet.to_data()
+            sent_packet = NTPPacket()
+            sent_packet.from_data(query_data)
+            sock.sendto(query_data, sockaddr)
 
             src_addr = None,
             while src_addr[0] != sockaddr[0]:
@@ -352,11 +469,33 @@ class NTPClient(object):
 
         stats = NTPStats()
         stats.from_data(response_packet)
+        _validate_response(stats, sent_packet.tx_timestamp)
         stats.dest_timestamp = dest_timestamp
         stats.local_time = dest_system
         stats.monotonic_time = dest_monotonic
         stats.python_monotonic_time = python_monotonic
         return stats
+
+
+def _validate_response(stats, expected_orig_timestamp):
+    """Reject NTP replies that cannot safely anchor the local clock."""
+    if stats.mode != 4:
+        raise NTPException(
+            'Invalid NTP response mode %s; expected server mode 4.'
+            % stats.mode
+        )
+    if stats.leap == 3:
+        raise NTPException('NTP server reports an unsynchronized clock.')
+    if not 1 <= stats.stratum <= 15:
+        raise NTPException(
+            'Invalid or unsynchronized NTP stratum %s.' % stats.stratum
+        )
+    if stats.orig_timestamp != expected_orig_timestamp:
+        raise NTPException(
+            'NTP response originate timestamp does not match the request.'
+        )
+    if stats.tx_timestamp == 0:
+        raise NTPException('NTP response has no transmit timestamp.')
 
 
 def _to_int(timestamp):

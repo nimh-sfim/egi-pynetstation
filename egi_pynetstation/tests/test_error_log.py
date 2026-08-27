@@ -13,16 +13,23 @@ import warnings
 
 import pytest
 
+from egi_pynetstation import egi_ntp
+
 
 netstation_module = importlib.import_module('egi_pynetstation.NetStation')
 NetStation = netstation_module.NetStation
 
 
 class FakeResponse:
+    """Stands in for NTPStats, including the clock readings it carries."""
+
     def __init__(self):
         self.offset = 0.0
         self.delay = 0.002
         self.tx_time = 0.0
+        self.local_time = time.time()
+        self.monotonic_time = egi_ntp.monotonic_time()
+        self.python_monotonic_time = time.monotonic()
 
 
 def make_station(tmp_path, monkeypatch, reply=b'Z', write_error=None):
@@ -190,6 +197,8 @@ def test_drift_model_engage_stall_and_recover_are_logged(tmp_path):
 
     engaged, stalled, recovered = records
     assert engaged['elapsed'] == pytest.approx(60.0)
+    assert engaged['drift_accepted_fits'] == 1
+    assert engaged['active_slope'] is not None
     # The stall is reported once, shortly after the step, not on every fit.
     assert stalled['drift_consecutive_rejections'] == 3
     assert stalled['drift_last_reject_reason'] == 'high_residual'
@@ -495,7 +504,7 @@ def test_send_event_raises_on_bad_start_instead_of_returning(
 def test_gettime_never_refits_or_writes_to_disk(tmp_path, monkeypatch):
     """getTime() must be a pure reader: no refit, no I/O, ever.
 
-    time_at_monotonic() holds _clock_lock. It used to reach
+    time_at_capture() holds _clock_lock. It used to reach
     _ntp_drift_regression() with a dirty model, which ran a full O(window)
     regression and, on a model transition, an _append_error_log() that does
     mkdir + open + write -- all inside the lock, on whatever thread called

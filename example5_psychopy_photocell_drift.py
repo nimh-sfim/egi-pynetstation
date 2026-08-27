@@ -252,6 +252,46 @@ def make_quit_checker():
     return poll_both
 
 
+def warm_up_before_trials(
+    ns: NetStation,
+    win,
+    should_quit,
+    seconds: float,
+    cooperative: bool = False,
+) -> float:
+    """Hold a responsive black screen while the clock model warms up."""
+    if seconds <= 0:
+        return 0.0
+
+    started = ns.capture_time()
+    deadline = started + seconds
+    print(f'Warming up clock model for {seconds:g} s...')
+    while True:
+        if should_quit():
+            raise KeyboardInterrupt
+        remaining = deadline - ns.capture_time()
+        if remaining <= 0:
+            break
+        if cooperative:
+            ns.sample_drift_if_due(available_pause=remaining)
+        # Keep the PsychoPy window responsive and visibly black throughout
+        # the wait. flip() also prevents this loop from busy-spinning.
+        win.flip()
+
+    elapsed = ns.capture_time() - started
+    state = ns.clock_state()
+    model_status = (
+        'engaged' if state.get('active_drift_slope') is not None
+        else 'not yet engaged'
+    )
+    print(
+        f'Warmup complete after {elapsed:.1f} s: '
+        f'{state.get("drift_valid_samples", 0)} valid drift samples, '
+        f'model {model_status}.'
+    )
+    return elapsed
+
+
 CSV_COLUMNS = [
     'trial',
     'phase',
@@ -375,22 +415,31 @@ def build_parser() -> ArgumentParser:
     parser.add_argument('--ip-clock', help='NTP server / amplifier IPv4 address')
     parser.add_argument('--port', type=int, help='ECI TCP port')
     parser.add_argument('--duration', type=float, default=300.0)
+    parser.add_argument(
+        '--warmup',
+        type=float,
+        default=0.0,
+        help=(
+            'Wait this many seconds after setup and before trial 1, allowing '
+            'the drift model to collect samples; default: 0'
+        ),
+    )
     parser.add_argument('--dot-duration', type=float, default=0.100)
     parser.add_argument('--dot-radius', type=float, default=0.045)
     parser.add_argument('--dot-pos', type=float, nargs=2, default=(0.72, 0.40))
-    parser.add_argument('--sample-interval', type=float, default=15.0)
-    parser.add_argument('--drift-min-samples', type=int, default=13)
-    parser.add_argument('--drift-min-span', type=float, default=180.0)
+    parser.add_argument('--sample-interval', type=float, default=None)
+    parser.add_argument('--drift-min-samples', type=int, default=None)
+    parser.add_argument('--drift-min-span', type=float, default=None)
     parser.add_argument(
         '--drift-max-delay',
         type=float,
-        default=0.010,
+        default=None,
         help='Reject NTP drift samples above this round-trip delay, in seconds',
     )
     parser.add_argument(
         '--drift-max-residual',
         type=float,
-        default=0.003,
+        default=None,
         help=(
             'Reject NTP drift fits whose maximum absolute residual exceeds '
             'this many seconds'
@@ -399,7 +448,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-window-minutes',
         type=float,
-        default=15.0,
+        default=None,
         help=(
             'Use only the last N minutes of valid drift samples for the model; '
             '0 uses all valid samples'
@@ -408,7 +457,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-samples',
         type=int,
-        default=4,
+        default=None,
         help=(
             'NTP queries per drift sample; the lowest-delay reply is kept. '
             'Higher values reduce offset noise at the cost of a longer pause'
@@ -417,13 +466,13 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-sample-spacing',
         type=float,
-        default=0.05,
+        default=None,
         help='Seconds between NTP queries within one drift sample burst',
     )
     parser.add_argument(
         '--drift-min-pause',
         type=float,
-        default=0.35,
+        default=None,
         help=(
             'Minimum idle time, in seconds, required between stimuli before '
             'an NTP drift burst is taken; shorter gaps are skipped'
@@ -432,7 +481,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-stall-after',
         type=int,
-        default=5,
+        default=None,
         help=(
             'Consecutive rejected drift fits, after the model has engaged, '
             'before a drift_model_stalled record is logged'
@@ -452,7 +501,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-slew',
         type=float,
-        default=0.0002,
+        default=None,
         help=(
             'Maximum rate, in seconds of correction per second elapsed, at '
             'which level errors are retired; 0 applies them instantly'
@@ -461,7 +510,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-max-model-age',
         type=float,
-        default=600.0,
+        default=None,
         help=(
             'Stop extrapolating a fitted slope after this many seconds; '
             '0 extrapolates without bound'
@@ -523,23 +572,34 @@ def main(argv=None) -> int:
         parser.error('--ntpsync-every must be >= 0')
     if args.ntpsync_after_every < 0:
         parser.error('--ntpsync-after-every must be >= 0')
-    if args.drift_max_delay <= 0:
+    if args.warmup < 0:
+        parser.error('--warmup must be non-negative')
+    if args.drift_max_delay is not None and args.drift_max_delay <= 0:
         parser.error('--drift-max-delay must be positive')
-    if args.drift_max_residual <= 0:
+    if args.drift_max_residual is not None and args.drift_max_residual <= 0:
         parser.error('--drift-max-residual must be positive')
-    if args.drift_window_minutes < 0:
+    if (
+        args.drift_window_minutes is not None
+        and args.drift_window_minutes < 0
+    ):
         parser.error('--drift-window-minutes must be non-negative')
-    if args.drift_samples < 1:
+    if args.drift_samples is not None and args.drift_samples < 1:
         parser.error('--drift-samples must be at least 1')
-    if args.drift_sample_spacing < 0:
+    if (
+        args.drift_sample_spacing is not None
+        and args.drift_sample_spacing < 0
+    ):
         parser.error('--drift-sample-spacing must be non-negative')
-    if args.drift_slew < 0:
+    if args.drift_slew is not None and args.drift_slew < 0:
         parser.error('--drift-slew must be non-negative')
-    if args.drift_max_model_age < 0:
+    if (
+        args.drift_max_model_age is not None
+        and args.drift_max_model_age < 0
+    ):
         parser.error('--drift-max-model-age must be non-negative')
-    if args.drift_min_pause < 0:
+    if args.drift_min_pause is not None and args.drift_min_pause < 0:
         parser.error('--drift-min-pause must be non-negative')
-    if args.drift_stall_after < 1:
+    if args.drift_stall_after is not None and args.drift_stall_after < 1:
         parser.error('--drift-stall-after must be at least 1')
 
     ip_cmd, ip_clock, port = resolve_network(args)
@@ -627,6 +687,14 @@ def main(argv=None) -> int:
             'dot_frames': dot_frames,
             'clock': None,
         })
+
+        warm_up_before_trials(
+            ns,
+            win,
+            should_quit,
+            args.warmup,
+            cooperative=args.drift_cooperative,
+        )
 
         exp_clock = core.MonotonicClock()
         next_onset = 0.0

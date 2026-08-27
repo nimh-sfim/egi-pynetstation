@@ -141,10 +141,15 @@ a run validates what real experiments actually do.
       --fullscreen \
       --screen 1 \
       --duration 3600 \
+      --warmup 200 \
       --log photocell.csv \
       --error-log photocell_errors.jsonl
 
-That is the whole command. Every drift setting is already at the value a
+``--warmup 200`` keeps a responsive black screen up before trial 1 while
+the default drift sampler gathers enough evidence to engage the model.
+Omit it when starting uncorrected is useful to the validation.
+
+Every drift setting is already at the value a
 validation run wants: background sampling, the model quality gates, and
 the sampling schedule are all on by default, so there is nothing to pass.
 Drop ``--screen 1`` if the stimulus display is your only one.
