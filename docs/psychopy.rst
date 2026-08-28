@@ -1,6 +1,12 @@
 Using PsychoPy
 ==============
 
+PsychoPy Basics
+~~~~~~~~~~~~~~~
+
+Everything needed to run a correctly timed experiment in the default
+setup.
+
 Quickstart: background sampling is already on
 ----------------------------------------------
 
@@ -48,11 +54,35 @@ There is no ``queue``, no ``threading``, no manual timestamp bookkeeping,
 and no inter-trial sampling hook to maintain. A complete working version is
 :doc:`example3_stroop.py <examples>`.
 
-Core calls in the default setup
--------------------------------
+Default setup at a glance
+-------------------------
 
 Six calls cover a complete experiment. Everything else in this package is
 diagnostics or optional tuning.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Call
+     - When
+   * - ``ns.connect(...)``
+     - Once, at startup.
+   * - ``ns.begin_rec()``
+     - Once, before any events.
+   * - ``win.callOnFlip(ns.send_event, ...)``
+     - Every stimulus onset you want marked.
+   * - ``ns.send_event(...)``
+     - Responses, trial boundaries, anything not tied to a flip.
+   * - ``ns.end_rec()``
+     - Once, at the end.
+   * - ``ns.disconnect()``
+     - Once, after ``end_rec()``.
+
+Core calls in the default setup
+-------------------------------
+
+Those six calls in detail.
 
 ``ns.connect(...)``
 ^^^^^^^^^^^^^^^^^^^
@@ -166,7 +196,10 @@ this package:
 
 On the macOS rig the penalty sits at or below the 0.94 ms standard
 deviation of the photocell measurement itself — it is not detectable, and
-warming up buys nothing measurable. On the Windows rig it is 8.5 ms, and
+warming up buys nothing measurable. A separate measurement on that rig put
+the bias during the warm-up window at about **-0.9 ms** relative to steady
+state, consistent with the range computed above. On the Windows rig the
+penalty is 8.5 ms, and
 a photocell recording shows it plainly: the offset fell from 22 ms to
 15 ms over the first 144 s, then returned to 22 ms once the model engaged
 and its level error had been retired.
@@ -189,6 +222,14 @@ slope the model fitted:
 Multiply by 195/3600 and compare against the timing precision your
 paradigm needs. Under a millisecond, ignore all of this. Several
 milliseconds, use one of the strategies below.
+
+One case raises the stakes. If you run **without a photocell** and rely on
+a constant offset characterised in some earlier session, the warm-up bias
+goes straight into that correction and there is nothing in the recording
+from which to recover it afterwards. A photocell records the truth
+per-session and lets you find the affected trials later; a characterised
+constant does not. Warm up before the first trial in that case, even if
+the bias looks small.
 
 What to do about it
 ^^^^^^^^^^^^^^^^^^^
@@ -250,6 +291,52 @@ verdict without blocking, and can simply be logged beside your data:
 
     record['clock_ready'] = ns.drift_ready()['ready']
 
+.. _psychopy-cleanup:
+
+Cleanup
+-------
+
+``ns.end_rec()``
+^^^^^^^^^^^^^^^^
+
+Stops the recording. Any events still queued are flushed first, so
+markers sent on the last trial still arrive.
+
+.. code-block:: python
+
+    ns.end_rec()
+
+``ns.disconnect()``
+^^^^^^^^^^^^^^^^^^^
+
+Closes the connection and stops the background threads. Also flushes
+queued events, and warns if drift sampling never happened.
+
+.. code-block:: python
+
+    ns.disconnect()
+
+Put both of these in a ``finally`` block so they run even if the
+experiment raises or the participant quits early:
+
+.. code-block:: python
+
+    recording = False
+    try:
+        ns.begin_rec()
+        recording = True
+        ...
+    finally:
+        if recording:
+            ns.end_rec()
+        ns.disconnect()
+
+PsychoPy Advanced
+~~~~~~~~~~~~~~~~~
+
+Why the default setup works, what to do when it does not fit, and the
+display-timing behaviour that rapid designs run into.
+
 .. _manual-drift-sampling:
 
 Optional: only after disabling background sampling
@@ -257,8 +344,7 @@ Optional: only after disabling background sampling
 
 This section applies only if you deliberately connected with
 ``auto_drift_background=False``.  With the default ``True`` setting, the
-background sampler already does this work and you should continue at
-:ref:`psychopy-cleanup`.
+background sampler already does this work and nothing here is needed.
 
 ``ns.sample_drift_if_due(available_pause=...)``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -402,68 +488,6 @@ Rule of thumb: leave sampling to the background thread unless you have a
 specific reason not to. If you do, use ``sample_drift_if_due()`` in your
 trial loop, where the schedule should decide; ``sample_drift()`` outside
 it — a warm-up loop, a rest break — where you decide.
-
-.. _psychopy-cleanup:
-
-Cleanup
--------
-
-``ns.end_rec()``
-^^^^^^^^^^^^^^^^
-
-Stops the recording. Any events still queued are flushed first, so
-markers sent on the last trial still arrive.
-
-.. code-block:: python
-
-    ns.end_rec()
-
-``ns.disconnect()``
-^^^^^^^^^^^^^^^^^^^
-
-Closes the connection and stops the background threads. Also flushes
-queued events, and warns if drift sampling never happened.
-
-.. code-block:: python
-
-    ns.disconnect()
-
-Put both of these in a ``finally`` block so they run even if the
-experiment raises or the participant quits early:
-
-.. code-block:: python
-
-    recording = False
-    try:
-        ns.begin_rec()
-        recording = True
-        ...
-    finally:
-        if recording:
-            ns.end_rec()
-        ns.disconnect()
-
-Default setup at a glance
--------------------------
-
-.. list-table::
-   :header-rows: 1
-   :widths: 40 60
-
-   * - Call
-     - When
-   * - ``ns.connect(...)``
-     - Once, at startup.
-   * - ``ns.begin_rec()``
-     - Once, before any events.
-   * - ``win.callOnFlip(ns.send_event, ...)``
-     - Every stimulus onset you want marked.
-   * - ``ns.send_event(...)``
-     - Responses, trial boundaries, anything not tied to a flip.
-   * - ``ns.end_rec()``
-     - Once, at the end.
-   * - ``ns.disconnect()``
-     - Once, after ``end_rec()``.
 
 Why this is safe in a flip callback
 -----------------------------------
@@ -710,15 +734,3 @@ Stimulus computer setup
 * On Windows, add Defender exclusions for the experiment directory and
   the Python environment; real-time scanning is a common source of
   multi-millisecond hiccups.
-
-Warm-up
--------
-
-Drift correction does not engage until the model has enough evidence —
-13 samples spanning 180 seconds by default, so roughly four minutes at a
-15-second interval. Measured bias during that window is about
-**-0.94 ms** relative to steady state.
-
-If you intend to run without a photocell and rely on a previously
-characterised constant offset, collect drift samples during setup or
-instructions so the model is live before the first trial.
