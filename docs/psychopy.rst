@@ -186,8 +186,19 @@ screen. Never call it inside a flip callback or a tight stimulus loop.
 
 The most useful case is warming the model up before the first trial.
 Drift correction needs 13 samples spanning 180 seconds by default, so an
-experiment that starts cold spends its first few minutes uncorrected. A
-short loop while the participant reads the instructions fixes that:
+experiment that starts cold spends its first few minutes uncorrected.
+
+Before reaching for this, note that the cheaper fix is usually to call
+``connect()`` earlier. Since 2.1 the sampler runs between ``connect()``
+and ``begin_rec()`` and those samples are kept, so an experiment that
+connects at the start of cap application arrives at trial 1 with the
+model already engaged and nothing to warm up. See
+:ref:`starting-warm` in the drift documentation.
+
+Explicit sampling is still worth it when there is no such window --
+begin_rec() immediately follows connect() -- or when you want the
+warm-up to be deterministic rather than dependent on how long the cap
+took. A short loop while the participant reads the instructions:
 
 .. code-block:: python
 

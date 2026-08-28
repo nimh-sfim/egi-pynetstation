@@ -194,6 +194,12 @@ class NetStation(object):
         self._drift_slew = 0.0002
         self._drift_samples_per_call = 4
         self._drift_sample_spacing = 0.05
+        # Sample NTP between connect() and the ntpsync() inside begin_rec().
+        # A slope is invariant under a shift of the time origin, so samples
+        # taken before the epoch exists are fitted just as well once their
+        # elapsed coordinate is backfilled at sync. Cap application is
+        # twenty minutes of a warm, idle machine that used to be discarded.
+        self._drift_presync = True
         # Per-query NTP timeout. The client default is 5 s, so a 4-query
         # burst against a dead server could block ~20 s -- longer than
         # anything waiting on the sampler thread expects to wait.
@@ -348,6 +354,7 @@ class NetStation(object):
         drift_window_minutes: float = None,
         drift_samples: int = None,
         drift_sample_spacing: float = None,
+        drift_presync: bool = None,
         drift_slew: float = None,
         drift_max_model_age: float = None,
         auto_drift: bool = None,
@@ -389,6 +396,12 @@ class NetStation(object):
             is kept.
         drift_sample_spacing : float, optional
             Seconds between queries within one burst.
+        drift_presync : bool, optional
+            Sample NTP between ``connect()`` and the ``ntpsync()`` inside
+            :meth:`begin_rec`. True by default, so connecting at the start
+            of cap application lets the model engage before trial 1. Pass
+            False to discard that window instead. See
+            :meth:`set_drift_sampling`.
         drift_slew : float, optional
             Maximum rate, in seconds of correction per second of elapsed
             time, at which level errors are retired.
@@ -467,6 +480,7 @@ class NetStation(object):
             'window_minutes': drift_window_minutes,
             'samples': drift_samples,
             'spacing': drift_sample_spacing,
+            'presync': drift_presync,
             'slew': drift_slew,
             'max_model_age': drift_max_model_age,
             'auto_enabled': auto_drift,
@@ -515,7 +529,7 @@ class NetStation(object):
     _DRIFT_OPTION_KEYS = frozenset({
         'min_samples', 'min_span',
         'max_delay', 'max_residual', 'window_minutes',
-        'samples', 'spacing',
+        'samples', 'spacing', 'presync',
         'slew', 'max_model_age',
         'auto_enabled', 'auto_interval', 'auto_min_pause', 'auto_background',
     })
@@ -563,6 +577,7 @@ class NetStation(object):
         self.set_drift_sampling(
             samples=drift_options['samples'],
             spacing=drift_options['spacing'],
+            presync=drift_options['presync'],
         )
         self.set_drift_stability(
             slew=drift_options['slew'],
@@ -731,6 +746,7 @@ class NetStation(object):
             self._sync_system_time = t
             self._sync_monotonic = monotonic_t
             self._capture_minus_monotonic = monotonic_t - python_monotonic_t
+            self._backfill_presync_elapsed()
             self._client_clock_start_ntp = ntp_t
             self._record_ntp_drift_sample(
                 response,
@@ -740,6 +756,39 @@ class NetStation(object):
             )
         self._flush_pending_log_records()
         return cresponse
+
+    def _backfill_presync_elapsed(self) -> int:
+        """Give pre-sync drift samples an elapsed coordinate. Returns count.
+
+        Samples taken before ``ntpsync()`` were recorded with
+        ``elapsed=None`` because the epoch did not exist yet, which makes
+        them unusable to the fit. Their ``monotonic_time`` is in the same
+        package capture frame as ``_sync_monotonic``, so the coordinate is
+        simply a translation -- and a translation of the time origin
+        leaves the fitted *slope* unchanged. Only the intercept moves, and
+        the level is anchored separately by ``_activate_drift_model()``.
+
+        Pre-sync samples therefore land at negative elapsed. That is fine
+        everywhere it matters: the fit uses elapsed as a difference (span)
+        and mean-centred (the regression), and the window walk compares
+        differences.
+
+        Caller must hold ``_clock_lock``.
+        """
+        if self._sync_monotonic is None:
+            return 0
+        filled = 0
+        for sample in self._drift_history:
+            if sample.get('elapsed') is not None:
+                continue
+            monotonic_time = sample.get('monotonic_time')
+            if monotonic_time is None:
+                continue
+            sample['elapsed'] = monotonic_time - self._sync_monotonic
+            filled += 1
+        if filled:
+            self._drift_model_dirty = True
+        return filled
 
     @check_connected
     def resync(self, attention: bool = False):
@@ -1511,6 +1560,7 @@ class NetStation(object):
         self,
         samples: int = None,
         spacing: float = None,
+        presync: bool = None,
     ) -> dict:
         """Set the default NTP burst size used by ``sample_drift()``.
 
@@ -1522,6 +1572,16 @@ class NetStation(object):
             a cost of a few tens of milliseconds per sample.
         spacing:
             Seconds between queries inside one burst.
+        presync:
+            Allow drift samples to be taken between :meth:`connect` and
+            the :meth:`ntpsync` inside :meth:`begin_rec`. True by default.
+            Samples taken then are given their elapsed coordinate when the
+            sync happens, so a session that connects during cap
+            application can reach its first trial with the model already
+            engaged. Pass False to restore the pre-2.1 behaviour of
+            discarding that window -- worth doing if NTP traffic before
+            the recording starts is unwanted, or to measure what the
+            warm-up is buying.
         """
         with self._clock_lock:
             if samples is not None:
@@ -1532,9 +1592,12 @@ class NetStation(object):
                 if spacing < 0:
                     raise ValueError('spacing must be non-negative')
                 self._drift_sample_spacing = spacing
+            if presync is not None:
+                self._drift_presync = bool(presync)
             return {
                 'samples': self._drift_samples_per_call,
                 'spacing': self._drift_sample_spacing,
+                'presync': self._drift_presync,
             }
 
     @check_connected
@@ -1710,7 +1773,9 @@ class NetStation(object):
                 )
             if not active:
                 continue
-            if not self._connected or self._syncepoch is None:
+            if not self._connected:
+                continue
+            if self._syncepoch is None and not self._drift_presync:
                 continue
             try:
                 self.sample_drift()
@@ -1958,7 +2023,7 @@ class NetStation(object):
         """
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
-        if self._syncepoch is None:
+        if self._syncepoch is None and not self._drift_presync:
             raise RuntimeError('sample_drift is unavailable before NTP sync')
         if samples is None:
             samples = self._drift_samples_per_call
@@ -2005,7 +2070,7 @@ class NetStation(object):
         with self._clock_lock:
             if not self._auto_drift_enabled:
                 return {'sampled': False, 'reason': 'disabled'}
-            if self._syncepoch is None:
+            if self._syncepoch is None and not self._drift_presync:
                 return {'sampled': False, 'reason': 'not_synced'}
             now = time.monotonic()
             last = self._auto_drift_last_monotonic
@@ -2121,6 +2186,7 @@ class NetStation(object):
                 ),
                 'drift_samples': self._drift_samples_per_call,
                 'drift_sample_spacing': self._drift_sample_spacing,
+                'drift_presync': self._drift_presync,
                 'drift_slew': self._drift_slew,
                 'drift_max_model_age': (
                     0.0 if self._drift_max_model_age is None
@@ -2261,7 +2327,16 @@ class NetStation(object):
         # leaving the model dirty for the next reader to rebuild. getTime()
         # is a reader, and it is called from screen-flip callbacks -- it
         # must never be the thread that pays for an O(window) regression.
-        self._ntp_drift_regression()
+        #
+        # Skipped entirely for a pre-sync sample: with no elapsed
+        # coordinate it cannot enter a fit, so refitting would burn a
+        # regression per sample and -- worse -- count a 'too_few_samples'
+        # rejection each time, so a twenty-minute prep window would open
+        # the recording with eighty rejected fits in the log and nothing
+        # wrong. The backfill at ntpsync() marks the model dirty, which is
+        # what makes the whole prep window count as one refit.
+        if elapsed is not None:
+            self._ntp_drift_regression()
         return dict(sample)
 
     def _ntp_drift_regression(self, activation_elapsed: float = None):

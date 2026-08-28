@@ -194,6 +194,47 @@ A burst blocks for about ``(samples - 1) * spacing`` plus the round
 trips — roughly 170 ms at the defaults. Budget for that when choosing
 ``auto_drift_min_pause``.
 
+.. _starting-warm:
+
+Starting warm
+-------------
+
+``connect()`` starts the drift sampler, but until 2.1 every sample taken
+before ``begin_rec()`` was discarded: the elapsed-time coordinate the model fits against does not
+exist until ``ntpsync()`` establishes the epoch. Those samples are now
+kept and given their coordinate at the sync.
+
+This is sound because **a fitted slope is invariant under a shift of the
+time origin.** The offsets are recorded in the package's capture-clock
+frame, which exists from process start; re-referencing them to the sync
+epoch is a translation, which moves the intercept and leaves the slope
+alone. The level is anchored separately in any case. Pre-sync samples
+land at negative elapsed, which the fit and the window walk both handle,
+because both use elapsed as a difference.
+
+So an experiment that connects at the start of cap application reaches
+its first trial with the model already engaged, on a machine that has
+had twenty minutes to settle thermally -- which is also the best answer
+to the non-linearity that ``drift_min_span`` exists to protect against.
+Connect early:
+
+.. code-block:: python
+
+    ns.connect(ntp_ip='10.10.10.51')   # start of cap application
+    apply_net_and_check_impedances()   # sampling runs throughout
+    ns.begin_rec()                     # model already has its evidence
+
+Pass ``drift_presync=False`` to restore the old behaviour, or if NTP
+traffic before the recording starts is unwanted.
+
+A prep window also removes the level error that ``drift_slew`` would
+otherwise have to retire. The sync then lands at the end of a long
+sample series rather than three minutes before the first fit, so the
+offset it anchors on is current: in simulation against the measured
+-154 ms/hour drift, the first fit's level error falls from 4.7 ms
+(23 s of slew) to 0.016 ms. A session that begins recording cold still
+pays the ramp.
+
 How often to sample
 -------------------
 
@@ -321,6 +362,11 @@ Settings reference
    * - ``drift_sample_spacing``
      - ``0.05`` s
      - Seconds between queries inside one burst.
+   * - ``drift_presync``
+     - ``True``
+     - Take drift samples between ``connect()`` and the ``ntpsync()``
+       inside ``begin_rec()``, and give them their elapsed coordinate at
+       the sync.
    * - ``drift_slew``
      - ``0.0002``
      - Max seconds of level correction retired per second elapsed.

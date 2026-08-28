@@ -62,7 +62,7 @@ class FakeResponse:
         self.python_monotonic_time = time.monotonic()
 
 
-def make_connected(monkeypatch, reply=b'Z', strict_eci=None):
+def make_connected(monkeypatch, reply=b'Z', strict_eci=None, **connect_kwargs):
     """A connected station whose amplifier always answers `reply`."""
     monkeypatch.setattr(
         netstation_module, 'NTPClient',
@@ -88,7 +88,9 @@ def make_connected(monkeypatch, reply=b'Z', strict_eci=None):
 
     monkeypatch.setattr(netstation_module, 'Socket', FakeSocket)
     ns = NetStation('10.10.10.42', 55513)
-    ns.connect(ntp_ip='10.10.10.51', strict_eci=strict_eci)
+    ns.connect(
+        ntp_ip='10.10.10.51', strict_eci=strict_eci, **connect_kwargs,
+    )
     return ns, replies
 
 
@@ -845,3 +847,44 @@ def test_drift_settings_covers_every_connect_drift_argument():
     assert accepted - reported == set()
     # The one documented extra: settable only via set_drift_stability().
     assert reported - accepted == {'drift_stall_after'}
+
+
+def test_drift_sampling_is_allowed_before_the_clock_sync(monkeypatch):
+    """Cap application is warm-up time; the sampler used to sit it out.
+
+    sample_drift() raised before ntpsync(), and the background loop
+    skipped every tick, so the twenty-odd minutes between connect() and
+    begin_rec() produced nothing.
+    """
+    ns, _ = make_connected(monkeypatch)
+    try:
+        assert ns._syncepoch is None
+        sample = ns.sample_drift()
+        assert sample['elapsed'] is None
+        assert len(ns._drift_history) == 1
+
+        ns.begin_rec()
+        # The sync backfilled the coordinate the sample was missing.
+        assert ns._drift_history[0]['elapsed'] is not None
+    finally:
+        ns.disconnect()
+
+
+def test_presync_sampling_can_be_turned_off(monkeypatch):
+    ns, _ = make_connected(monkeypatch)
+    try:
+        ns.set_drift_sampling(presync=False)
+        with pytest.raises(RuntimeError, match='before NTP sync'):
+            ns.sample_drift()
+        assert ns._drift_history == []
+        assert ns.sample_drift_if_due()['reason'] == 'not_synced'
+    finally:
+        ns.disconnect()
+
+
+def test_connect_can_disable_presync_sampling(monkeypatch):
+    ns, _ = make_connected(monkeypatch, drift_presync=False)
+    try:
+        assert ns.drift_settings()['drift_presync'] is False
+    finally:
+        ns.disconnect()

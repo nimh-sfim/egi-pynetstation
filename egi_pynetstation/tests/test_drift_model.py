@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 import importlib
 
+import pytest
+
 from egi_pynetstation.NetStation import NetStation
 
 
@@ -290,3 +292,104 @@ def test_refresh_drift_model_forces_cached_model_to_refit(monkeypatch):
 
     assert abs(refreshed['slope'] - 0.002) < 1e-12
     assert abs(refreshed['active_slope'] - 0.002) < 1e-12
+
+
+def test_presync_samples_are_kept_and_backfilled_at_sync():
+    """Cap application is warm-up time the model used to discard.
+
+    Samples taken before ntpsync() have no elapsed coordinate because the
+    epoch does not exist yet. Their monotonic reading is in the same
+    capture frame as the eventual anchor, so the coordinate is a pure
+    translation -- and a translation of the origin leaves the slope
+    unchanged.
+    """
+    ns = make_station()
+    ns._sync_monotonic = None
+    ns.set_drift_requirements(min_samples=2, min_span=1.0)
+    ns.set_drift_model_options(window_minutes=0)
+
+    # 30 s of sampling before the epoch exists.
+    for monotonic_time, offset in (
+        (1000.0, 0.000), (1010.0, 0.010),
+        (1020.0, 0.020), (1030.0, 0.030),
+    ):
+        ns._record_ntp_drift_sample(
+            SimpleNamespace(offset=offset, delay=0.001, tx_time=0.0),
+            source='test',
+            local_time=monotonic_time,
+            monotonic_time=monotonic_time,
+        )
+
+    assert ns.drift_estimate()['slope'] is None
+    assert all(s['elapsed'] is None for s in ns._drift_history)
+
+    # ntpsync() lands here.
+    ns._sync_monotonic = 1030.0
+    assert ns._backfill_presync_elapsed() == 4
+    ns._drift_model_dirty = True
+
+    estimate = ns.drift_estimate()
+    assert estimate['slope'] == pytest.approx(0.001)
+    # Pre-sync samples sit at negative elapsed; that is the point.
+    assert [s['elapsed'] for s in ns._drift_history] == [
+        -30.0, -20.0, -10.0, 0.0
+    ]
+
+
+def test_backfilled_slope_matches_the_same_samples_taken_after_sync():
+    """The origin shift must not move the slope, only the intercept."""
+    before = make_station()
+    before._sync_monotonic = None
+    after = make_station()
+    for station in (before, after):
+        station.set_drift_requirements(min_samples=2, min_span=1.0)
+        station.set_drift_model_options(window_minutes=0)
+
+    for index, offset in enumerate((0.000, 0.010, 0.020)):
+        monotonic_time = 1000.0 + index * 10.0
+        before._record_ntp_drift_sample(
+            SimpleNamespace(offset=offset, delay=0.001, tx_time=0.0),
+            source='test',
+            local_time=monotonic_time, monotonic_time=monotonic_time,
+        )
+        add_drift_sample(after, index * 10.0, offset)
+
+    before._sync_monotonic = 1020.0
+    before._backfill_presync_elapsed()
+    before._drift_model_dirty = True
+
+    assert (before.drift_estimate()['slope']
+            == pytest.approx(after.drift_estimate()['slope']))
+
+
+def test_backfill_leaves_already_coordinated_samples_alone():
+    ns = make_station()
+    ns.set_drift_requirements(min_samples=2, min_span=1.0)
+    add_drift_sample(ns, 0.0, 0.000)
+    add_drift_sample(ns, 10.0, 0.010)
+
+    assert ns._backfill_presync_elapsed() == 0
+    assert [s['elapsed'] for s in ns._drift_history] == [0.0, 10.0]
+
+
+def test_presync_samples_do_not_accumulate_rejected_fits():
+    """A prep window must not open the recording with a log full of noise.
+
+    Every sample used to trigger a refit. Pre-sync samples cannot enter a
+    fit, so each one scored a 'too_few_samples' rejection -- eighty of
+    them across a twenty-minute cap application, with nothing wrong.
+    """
+    ns = make_station()
+    ns._sync_monotonic = None
+
+    for index in range(80):
+        monotonic_time = 1000.0 + index * 15.0
+        ns._record_ntp_drift_sample(
+            SimpleNamespace(offset=0.0, delay=0.001, tx_time=0.0),
+            source='test',
+            local_time=monotonic_time, monotonic_time=monotonic_time,
+        )
+
+    assert len(ns._drift_history) == 80
+    assert ns._drift_rejected_fits == 0
+    assert ns._drift_last_reject_reason is None

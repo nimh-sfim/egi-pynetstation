@@ -39,6 +39,7 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_window_minutes=args.drift_window_minutes,
             drift_samples=args.drift_samples,
             drift_sample_spacing=args.drift_sample_spacing,
+            drift_presync=not args.no_drift_presync,
             drift_slew=args.drift_slew,
             drift_max_model_age=args.drift_max_model_age,
             auto_drift=True,
@@ -416,6 +417,22 @@ def build_parser() -> ArgumentParser:
     parser.add_argument('--port', type=int, help='ECI TCP port')
     parser.add_argument('--duration', type=float, default=300.0)
     parser.add_argument(
+        '--prep',
+        type=float,
+        default=0.0,
+        help=(
+            'Wait this many seconds between connect() and begin_rec(), '
+            'standing in for cap application. Drift samples taken here are '
+            'backfilled at the sync, so the model can be engaged at trial 1; '
+            'default: 0'
+        ),
+    )
+    parser.add_argument(
+        '--no-drift-presync',
+        action='store_true',
+        help='Discard drift samples taken before the clock sync',
+    )
+    parser.add_argument(
         '--warmup',
         type=float,
         default=0.0,
@@ -574,6 +591,8 @@ def main(argv=None) -> int:
         parser.error('--ntpsync-after-every must be >= 0')
     if args.warmup < 0:
         parser.error('--warmup must be non-negative')
+    if args.prep < 0:
+        parser.error('--prep must be non-negative')
     if args.drift_max_delay is not None and args.drift_max_delay <= 0:
         parser.error('--drift-max-delay must be positive')
     if args.drift_max_residual is not None and args.drift_max_residual <= 0:
@@ -618,6 +637,19 @@ def main(argv=None) -> int:
             error_log=args.error_log,
         )
         connect_with_drift_options(ns, ip_clock, args)
+        if args.prep > 0:
+            # Stand in for cap application: the drift sampler runs here,
+            # before the clock sync exists, and those samples are given
+            # their elapsed coordinate when begin_rec() syncs. This is the
+            # only way to exercise drift_presync from this harness, since
+            # connect() and begin_rec() are otherwise back to back.
+            # A plain wait: the PsychoPy window does not exist yet, so
+            # there is nothing to poll for a keypress. Ctrl-C still works.
+            print(f'Simulating {args.prep:g} s of pre-sync prep...')
+            deadline = time.monotonic() + args.prep
+            while time.monotonic() < deadline:
+                time.sleep(min(1.0, deadline - time.monotonic()))
+            print(f'  {len(ns.drift_history())} pre-sync drift samples.')
         # begin_rec() rather than send_command('BeginRecording'):
         # send_command() is the non-strict diagnostic path, so a refused
         # or garbled response came back as a dictionary nobody inspected
