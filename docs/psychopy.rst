@@ -127,8 +127,85 @@ that line of code — both are equally precise. Returns ``None``; pass
 
 .. _psychopy-drift-countdown:
 
-Showing warm-up progress on screen
------------------------------------
+Waiting for the clock model
+---------------------------
+
+Drift correction does not apply until the model has enough evidence to
+fit, so an experiment that starts trials immediately runs its first few
+minutes uncorrected. Whether that matters to *you* depends entirely on
+how fast your stimulus computer's clock diverges from the amplifier's.
+
+Do you need to wait?
+^^^^^^^^^^^^^^^^^^^^
+
+The cost of starting cold is the product of two numbers:
+
+.. code-block:: text
+
+    error at first trial  ≈  drift rate  ×  time to engage
+
+``time to engage`` is about 195 s at the defaults (13 samples at the
+15-second interval). ``drift rate`` is a property of your particular
+stimulus computer and amplifier — two crystal oscillators — and it varies
+enormously between machines. Measured on the two rigs used to validate
+this package:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 26 40
+
+   * - Stimulus computer
+     - Measured drift
+     - Error at first trial
+   * - macOS validation rig
+     - 3.7 to 22.3 ms/hour
+     - 0.2 to 1.2 ms
+   * - Windows validation rig
+     - 157 ms/hour
+     - **8.5 ms**
+
+On the macOS rig the penalty sits at or below the 0.94 ms standard
+deviation of the photocell measurement itself — it is not detectable, and
+warming up buys nothing measurable. On the Windows rig it is 8.5 ms, and
+a photocell recording shows it plainly: the offset fell from 22 ms to
+15 ms over the first 144 s, then returned to 22 ms once the model engaged
+and its level error had been retired.
+
+.. important::
+
+   This is a difference between *oscillators*, not between operating
+   systems. A Windows machine with a well-behaved clock needs no warm-up;
+   a Mac with a poor one does. Do not read the table as a rule about
+   platforms — read it as a demonstration that the range is wide enough
+   that you have to check.
+
+Checking your own is one run. Record for a few minutes, then read the
+slope the model fitted:
+
+.. code-block:: python
+
+    print(ns.drift_ready()['slope_ms_per_hour'])
+
+Multiply by 195/3600 and compare against the timing precision your
+paradigm needs. Under a millisecond, ignore all of this. Several
+milliseconds, use one of the strategies below.
+
+What to do about it
+^^^^^^^^^^^^^^^^^^^
+
+In order of preference:
+
+1. **Call** ``connect()`` **earlier.** The sampler runs between
+   ``connect()`` and ``begin_rec()``, so connecting at the start of cap
+   application costs nothing and adds no time to the recording. See
+   :ref:`starting-warm`.
+2. **Wait after** ``begin_rec()`` **with** ``wait_for_drift()``, shown
+   below. Simple, but those minutes are recorded.
+3. **Start anyway** and log ``drift_ready()`` beside your data, so the
+   trials that ran uncorrected can be identified afterwards.
+
+Showing progress on screen
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``wait_for_drift()`` calls ``on_wait`` on every poll, which is where a
 PsychoPy experiment both redraws the window and keeps it responsive. The

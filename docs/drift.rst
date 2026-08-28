@@ -330,7 +330,10 @@ printed or drawn. Raising from it cancels the wait.
 
     ns.wait_for_drift(timeout=300, poll=1.0, on_wait=report)
 
-For an on-screen version in PsychoPy, see :ref:`psychopy-drift-countdown`.
+Whether waiting is worth anything on your hardware depends on your
+clock's drift rate, which varies by more than an order of magnitude
+between machines. :ref:`psychopy-drift-countdown` works through how to
+measure yours, and gives an on-screen version of this countdown.
 
 How often to sample
 -------------------

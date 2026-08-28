@@ -25,7 +25,7 @@ copyright = '2021-2026, Joshua B. Teves and Peter J. Molfese'
 author = 'Joshua B. Teves and Peter J. Molfese'
 
 # The full version, including alpha/beta/rc tags
-release = '2.0.0'
+release = '2.1.0'
 
 
 # -- General configuration ---------------------------------------------------

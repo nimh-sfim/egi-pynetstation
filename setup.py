@@ -13,7 +13,7 @@ with open('README.md', 'r', encoding='utf-8') as fh:
 
 setuptools.setup(
     name='egi_pynetstation',
-    version='2.0.0',
+    version='2.1.0',
     author='Joshua B. Teves',
     author_email='jbtevespro@gmail.com',
     description='Magstim-EGI EEG amplifier NetStation API',

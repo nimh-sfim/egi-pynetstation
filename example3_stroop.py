@@ -8,22 +8,23 @@ order. Five of those are congruent (word matches ink), twenty incongruent.
 
 This is a reference for the smallest clean egi_pynetstation setup. Every
 line that talks to the amplifier is marked with an "EGI:" comment. There
-are only six of them:
+are only seven of them:
 
     1. NetStation(...)                 create the connection
     2. ns.connect(...)                 connect; events send off-thread
     3. ns.begin_rec()                  start recording (does the NTP sync)
-    4. win.callOnFlip(ns.send_event)   mark stimulus onset on the flip
-    5. ns.send_event(...)              mark the button press
-    6. ns.end_rec() / ns.disconnect()  stop cleanly
+    4. ns.wait_for_drift(...)          optional readiness countdown
+    5. win.callOnFlip(ns.send_event)   mark stimulus onset on the flip
+    6. ns.send_event(...)              mark the button press
+    7. ns.end_rec() / ns.disconnect()  stop cleanly
 
 Ongoing drift sampling needs no call at all -- it runs on the package's
 own background thread, which is the default.
 
-This task also demonstrates ns.sample_drift() as an optional warm-up
-(below): running it during the instruction screen means the correction
-is already active by trial 1, rather than engaging partway through. A
-run this short accumulates only a fraction of a millisecond of drift
+This task also demonstrates ns.wait_for_drift() as an optional warm-up
+screen. It asks the package whether drift correction is ready yet and,
+if not, displays the reason while the background sampler keeps working.
+A run this short accumulates only a fraction of a millisecond of drift
 either way, so the warm-up is not doing load-bearing work here -- it is
 here to show the pattern for tasks where it would be.
 
@@ -65,30 +66,26 @@ INSTRUCTIONS = (
     'y = yellow    p = purple\n'
 )
 
-# Optional: warm the drift model up while the participant reads the
-# instructions, so correction is already active by trial 1 instead of
-# engaging partway through the task. Do not read this as "drift is
-# small": on validated hardware, a one-hour run with correction ON held
-# a residual trend of +0.49 ms/hour, but that is what correction leaves
-# BEHIND, not what it removed. The correction itself has been measured
-# removing up to ~3.7 ms/hour on the NTP-visible channel alone, and a
-# separate run showed a further ~13 ms/hour of marker drift from outside
-# that channel entirely (traced to the Net Station host clock, which
-# correction cannot reach either way). Left uncorrected, a real session
-# can accumulate double-digit milliseconds of drift per hour, which is
-# plenty to distort or wash out later ERP components -- do not disable
-# drift correction (drift_correction=True is the default; leave it).
-# What actually is negligible here is skipping *this warm-up specifically*
-# for THIS ~2-minute task: even at a conservative 15 ms/hour, two minutes
-# of uncorrected drift is about half a millisecond. The model needs
-# WARMUP_SAMPLES samples spanning at least drift_min_span seconds (180 by
-# default) before correction engages, so 13 x 15 s = 195 s clears it.
-# Set WARMUP_SAMPLES = 0 to skip just the warm-up; timestamps stay
-# correct either way, just uncorrected until the model has enough
-# samples of its own to engage on -- which happens automatically either
-# way, in the background, well before an hour-long recording is over.
-WARMUP_SAMPLES = 13
-WARMUP_INTERVAL_S = 15.0
+# Optional: wait while the background sampler gets the drift model ready,
+# so correction is active by trial 1 instead of engaging partway through
+# the task. Do not read this as "drift is small": on validated hardware,
+# a one-hour run with correction ON held a residual trend of +0.49
+# ms/hour, but that is what correction leaves BEHIND, not what it
+# removed. Left uncorrected, a real session can accumulate double-digit
+# milliseconds of drift per hour, which is plenty to distort later ERP
+# components -- do not disable drift correction (drift_correction=True is
+# the default; leave it).
+#
+# What is negligible here is skipping this warm-up specifically for this
+# short Stroop demo. The first answer from drift_ready() is the bool:
+# ready or not ready. The reason string is the follow-up diagnostic for
+# logs and operator messages: warming_up/settling can clear by waiting,
+# while stalled/model_expired/sampling_expired mean the clock path needs
+# attention. Set WARMUP_TIMEOUT_S = 0 to skip just the warm-up; the
+# package still samples in the background and correction engages when it
+# has enough evidence.
+WARMUP_TIMEOUT_S = 300.0
+WARMUP_POLL_S = 1.0
 
 FIXATION_S = 0.500
 RESPONSE_TIMEOUT_S = 2.000
@@ -107,42 +104,59 @@ def build_trials():
     return trials
 
 
-def warm_up_drift_model(ns, win, message):
-    """Collect drift samples while the instructions are on screen.
+def wait_for_clock_ready(ns, win, message):
+    """Show a clock-readiness countdown while background sampling runs.
 
     Optional. Nothing about this task requires it -- a Stroop run this
     short accumulates a negligible amount of drift whether or not
     correction ever engages. It is here so the pattern is on hand for a
-    longer task, where the two-minute head start it buys is worth having
-    from trial 1 rather than waiting for correction to engage mid-run.
+    longer task, where starting with a ready clock model is worth waiting
+    for.
 
     Returns False if the operator quit.
 
-    Shortening this window does not help. drift_min_span gates the fit at
-    whatever value it holds, so with the 180 s default, samples crammed
-    into less time produce no fit at all. Lowering the threshold lets a
-    short window fit but does not improve it -- accuracy comes from the
-    span actually sampled, which is why the gate exists. Span buys more
-    than count: slope uncertainty falls as 1/span but only as 1/sqrt(n).
+    wait_for_drift() is a readiness helper, not a timing primitive. It is
+    safe here because no stimulus onset is being timed. Do not call it
+    from a flip callback or inside a trial.
     """
-    for index in range(WARMUP_SAMPLES):
-        remaining = (WARMUP_SAMPLES - index) * WARMUP_INTERVAL_S
+    if WARMUP_TIMEOUT_S <= 0:
+        return True
+
+    def show_progress(status):
+        if event.getKeys(keyList=QUIT_KEYS):
+            raise KeyboardInterrupt
+        eta = status['estimated_seconds_remaining']
+        if status['ready']:
+            body = 'Clock model ready.'
+        elif eta is not None:
+            body = f'Preparing the clock: about {eta:.0f} s left'
+        else:
+            body = f'Preparing the clock: {status["reason"]}'
         message.text = (
             INSTRUCTIONS
-            + f'\n\nPreparing the clock: about {remaining:.0f} s left'
+            + f'\n\n{body}\n\nPress q or escape to skip.'
         )
         message.draw()
         win.flip()
 
-        # EGI 4: take a sample now. Safe here because we know nothing is
-        # being timed -- never do this near a flip that matters.
-        ns.sample_drift()
+    try:
+        # EGI 4: wait for drift readiness. The callback redraws the window
+        # every poll; background sampling continues on the package thread.
+        status = ns.wait_for_drift(
+            timeout=WARMUP_TIMEOUT_S,
+            poll=WARMUP_POLL_S,
+            on_wait=show_progress,
+        )
+    except KeyboardInterrupt:
+        return False
 
-        timer = core.Clock()
-        while timer.getTime() < WARMUP_INTERVAL_S:
-            if event.getKeys(keyList=QUIT_KEYS):
-                return False
-            core.wait(0.05)
+    if status['ready']:
+        print('Drift correction ready before trial 1: '
+              f"{status['slope_ms_per_hour']:.1f} ms/hour")
+    else:
+        print('Drift correction not ready before trial 1: '
+              f"{status['reason']}; trials start with the current correction "
+              'state.')
     return True
 
 
@@ -183,10 +197,10 @@ def main():
         ns.begin_rec()
         recording = True
 
-        # Warm the drift model up while the participant reads, so the
-        # first trial is already drift-corrected. This has to come after
-        # begin_rec(), because sample_drift() needs the NTP sync it does.
-        if WARMUP_SAMPLES and not warm_up_drift_model(ns, win, message):
+        # Optional warm-up/readiness screen. This has to come after
+        # begin_rec(), because begin_rec() establishes the NTP epoch that
+        # drift_ready() and wait_for_drift() evaluate.
+        if not wait_for_clock_ready(ns, win, message):
             return 0
 
         message.text = INSTRUCTIONS + '\n\nPress space to begin.'
@@ -195,13 +209,8 @@ def main():
         if event.waitKeys(keyList=['space'] + QUIT_KEYS)[0] in QUIT_KEYS:
             return 0
 
-        state = ns.clock_state()
-        if state['drift_accepted_fits']:
-            print('Drift correction engaged before trial 1: '
-                  f"{state['active_drift_slope'] * 3.6e6:.1f} ms/hour")
-        else:
-            print('Drift correction not yet engaged; trials start '
-                  'uncorrected.')
+        readiness = ns.drift_ready()
+        print('Clock readiness before trial 1:', readiness)
 
         for index, trial in enumerate(trials, start=1):
             # --- fixation ---
@@ -337,16 +346,17 @@ if __name__ == '__main__':
 
 
 # NOTE ON THE WARM-UP
-# Drift correction does not engage until the model has enough evidence:
-# 13 NTP samples spanning at least 180 seconds by default. The 25 trials
-# here take only about two minutes, so without a warm-up the correction
-# would never activate at all. warm_up_drift_model() collects those
-# samples while the instructions are on screen, which is time a real
-# experiment is spending anyway.
+# Drift correction does not report ready until the model has enough
+# evidence and any first level correction has finished settling. By
+# default that means 13 NTP samples spanning at least 180 seconds, so the
+# 25 trials here may finish before readiness arrives unless the experiment
+# connects early or waits before trial 1.
 #
-# That does mean the instruction screen sits for about 195 seconds. Set
-# WARMUP_SAMPLES = 0 to skip it; timestamps are still correct, just
-# uncorrected for drift.
+# wait_for_clock_ready() does not collect samples itself. It keeps the
+# instruction screen alive while the package's background sampler does
+# the same work it would already be doing. Set WARMUP_TIMEOUT_S = 0 to
+# skip the wait; timestamps are still correct, just not necessarily
+# drift-corrected yet.
 #
 # Do not try to shorten it by sampling faster. drift_min_span gates the
 # fit at whatever value it holds, so with the 180 s default, samples

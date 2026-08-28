@@ -61,7 +61,7 @@ def _warn_coarse_monotonic():
         'Windows before Python 3.13: time.monotonic() advances in ~15.6 ms '
         'steps there, so the reading passed in was already quantised. '
         'Capture with NetStation.capture_time() and convert with '
-        'time_at_capture() instead.',
+        'time_at_capture() instead. It will be removed in 3.0.',
         FutureWarning,
         stacklevel=3,
     )
@@ -402,6 +402,8 @@ class NetStation(object):
             of cap application lets the model engage before trial 1. Pass
             False to discard that window instead. See
             :meth:`set_drift_sampling`.
+
+            .. versionadded:: 2.1.0
         drift_slew : float, optional
             Maximum rate, in seconds of correction per second of elapsed
             time, at which level errors are retired.
@@ -923,12 +925,18 @@ class NetStation(object):
         return self.time_at_capture(self.capture_time())
 
     def capture_time(self):
-        """Capture the package's high-resolution monotonic clock."""
+        """Capture the package's high-resolution monotonic clock.
+
+        .. versionadded:: 2.1.0
+        """
         return ntp_monotonic_time()
 
     @check_connected
     def time_at_capture(self, captured_time: float):
-        """Convert a value from :meth:`capture_time` to an event timestamp."""
+        """Convert a value from :meth:`capture_time` to an event timestamp.
+
+        .. versionadded:: 2.1.0
+        """
         with self._clock_lock:
             if self._syncepoch is None:
                 raise RuntimeError('getTime is unavailable before NTP sync')
@@ -944,7 +952,7 @@ class NetStation(object):
     def time_at_monotonic(self, monotonic_time: float):
         """Convert a standard ``time.monotonic()`` reading.
 
-        .. deprecated:: 2.1
+        .. deprecated:: 2.1.0
             Use :meth:`capture_time` with :meth:`time_at_capture`. This
             method will be removed in 3.0.
 
@@ -1582,6 +1590,8 @@ class NetStation(object):
             discarding that window -- worth doing if NTP traffic before
             the recording starts is unwanted, or to measure what the
             warm-up is buying.
+
+            .. versionadded:: 2.1.0
         """
         with self._clock_lock:
             if samples is not None:
@@ -2180,6 +2190,8 @@ class NetStation(object):
         See Also
         --------
         wait_for_drift : Block until this returns ready.
+
+        .. versionadded:: 2.1.0
         """
         health = self._ntp_sampling_health()
         if max_pending is None:
@@ -2306,6 +2318,8 @@ class NetStation(object):
         -----
         This blocks, so never call it from a screen-flip callback or
         anywhere inside a stimulus loop.
+
+        .. versionadded:: 2.1.0
         """
         if timeout < 0:
             raise ValueError('timeout must be non-negative')
@@ -2438,7 +2452,14 @@ class NetStation(object):
 
     @staticmethod
     def clock_report() -> dict:
-        """Describe the clocks used by the vendored NTP implementation."""
+        """Describe the clocks used by the vendored NTP implementation.
+
+        Called automatically by :meth:`connect`, which stores the result in
+        the ``session_start`` log record, so every session carries the clock
+        provenance of the machine that produced it.
+
+        .. versionadded:: 2.1.0
+        """
         report = ntp_clock_report()
         report['coarse_monotonic_platform'] = _COARSE_MONOTONIC
         return report
