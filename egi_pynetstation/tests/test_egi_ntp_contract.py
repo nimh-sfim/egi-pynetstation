@@ -129,6 +129,35 @@ def test_clock_resolution_measures_what_the_os_delivers(monkeypatch):
     assert egi_ntp.clock_resolution(lambda: 5.0, limit=0.01) is None
 
 
+def test_sleep_granularity_is_reported_but_never_warned_about(monkeypatch):
+    """A coarse timer tick stretches waits; it does not corrupt timestamps.
+
+    Folding it into clocks_ok, or warning on it, would train people to
+    ignore a warning that does mean a corrupted recording.
+    """
+    monkeypatch.setattr(egi_ntp, 'sleep_granularity', lambda *a, **k: 0.0156)
+    report = egi_ntp.clock_report()
+
+    assert report['measured_sleep_granularity'] == 0.0156
+    assert report['sleep_granularity_ok'] is False
+    # The clocks that do carry timestamps are fine, so nothing warns.
+    assert report['clocks_ok'] is True
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        checked = egi_ntp.check_clock_resolution()
+    assert 'warning' not in checked
+
+
+def test_sleep_granularity_takes_the_best_trial_not_the_last(monkeypatch):
+    """One descheduled trial must not be mistaken for the timer tick."""
+    monkeypatch.setattr(egi_ntp.time, 'sleep', lambda s: None)
+    counter = iter([0.0, 0.0156, 0.0156, 0.0167, 0.0167, 0.0567])
+    monkeypatch.setattr(egi_ntp.time, 'perf_counter', lambda: next(counter))
+
+    # Trials measure 15.6 ms, 1.1 ms, then 40.0 ms.
+    assert egi_ntp.sleep_granularity(samples=3) == pytest.approx(0.0011)
+
+
 def test_a_coarse_capture_clock_is_reported_not_hidden(monkeypatch):
     monkeypatch.setattr(
         egi_ntp, 'clock_resolution',

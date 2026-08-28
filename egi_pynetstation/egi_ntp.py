@@ -139,6 +139,10 @@ NTP_DELTA = NTP.NTP_DELTA
 
 WINDOWS = sys.platform == 'win32'
 COARSE_CLOCK_THRESHOLD = 0.001
+# A raised Windows timer tick is ~1 ms; the default is ~15.6 ms. Anything
+# at or under 2 ms means the tick has been raised (or the platform has no
+# such tick), which is all this flag is asked to distinguish.
+COARSE_SLEEP_THRESHOLD = 0.002
 
 
 def precise_system_time():
@@ -205,6 +209,40 @@ def clock_resolution(clock=monotonic_time, limit=0.05, samples=5):
     return min(steps) if steps else None
 
 
+def sleep_granularity(requested=0.001, samples=3):
+    """Measure the shortest sleep this process can actually take, in seconds.
+
+    Windows sleeps are rounded up to the system timer tick, which is
+    ~15.6 ms by default and ~1 ms once some process in the session has
+    called ``timeBeginPeriod``. Unlike the clock resolutions above this
+    does not corrupt any timestamp -- ``perf_counter`` and
+    ``GetSystemTimePreciseAsFileTime`` are QPC-derived and tick
+    independent -- but it does stretch everything that waits:
+    ``drift_sample_spacing`` between NTP queries in a burst, the
+    background sampler's wakeups, and the event sender's queue waits. A
+    50 ms spacing becomes 62.5 ms on a coarse tick, so the pause budget
+    an experiment reasons about is wrong by more than it expects.
+
+    Reported, not warned about, and takes the minimum of a few trials so
+    one descheduled trial does not stand in for the tick. Costs about
+    ``samples`` ticks, so ~50 ms on the machine where it matters and
+    microseconds everywhere else.
+
+    See also ``python -m egi_pynetstation.check_clocks --compare``, which
+    measures this against PsychoPy and timeBeginPeriod() to say *what*
+    should raise the resolution. This probe records what the session
+    actually got.
+    """
+    if samples < 1:
+        raise ValueError('samples must be at least 1')
+    slept = []
+    for _ in range(samples):
+        start = time.perf_counter()
+        time.sleep(requested)
+        slept.append(time.perf_counter() - start)
+    return min(slept)
+
+
 def clock_report():
     """Describe the clocks this process will actually use."""
     report = {
@@ -213,6 +251,7 @@ def clock_report():
         'capture_clock': 'perf_counter',
         'measured_capture_resolution': clock_resolution(),
         'measured_system_resolution': clock_resolution(precise_system_time),
+        'measured_sleep_granularity': sleep_granularity(),
     }
     for name in ('perf_counter', 'monotonic', 'time'):
         try:
@@ -229,6 +268,13 @@ def clock_report():
         )
     report['clocks_ok'] = (
         report['capture_clock_ok'] and report['system_clock_ok']
+    )
+    # Deliberately outside clocks_ok, and check_clock_resolution() does not
+    # warn on it. A coarse tick makes waits imprecise; it does not put a
+    # wrong number in an event timestamp, and warning about it would train
+    # people to ignore a warning that does mean corrupted data.
+    report['sleep_granularity_ok'] = (
+        report['measured_sleep_granularity'] <= COARSE_SLEEP_THRESHOLD
     )
     return report
 

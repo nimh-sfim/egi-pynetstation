@@ -29,6 +29,57 @@ Related accessors:
 * :meth:`~egi_pynetstation.NetStation.NetStation.drift_settings` — every
   drift setting in effect. Worth logging beside your data, so a session's
   configuration is recoverable later. See :doc:`drift`.
+* :meth:`~egi_pynetstation.NetStation.NetStation.clock_report` — which
+  clocks this process actually uses and what resolution they measured.
+
+Clock report
+------------
+
+``clock_report()`` is a static method, so it needs no connection:
+
+.. code-block:: python
+
+    from egi_pynetstation.NetStation import NetStation
+    import json
+    print(json.dumps(NetStation.clock_report(), indent=2))
+
+``connect()`` runs it automatically and stores the result under
+``clocks`` in the ``session_start`` record of the error log, so every
+recording carries the clock provenance of the machine that produced it.
+If either timing clock measures coarser than 1 ms, ``connect()`` also
+raises a ``RuntimeWarning``.
+
+Three measured fields matter:
+
+``measured_capture_resolution``
+    Step size actually observed from the event-timestamp clock. Above
+    1 ms, event timestamps are quantised **and** NTP offsets get noisy
+    enough that no drift line can satisfy ``drift_max_residual``, so
+    drift correction never engages. That combination is what a coarse
+    clock did on Windows before 2.1.
+
+``measured_system_resolution``
+    The same for the wall clock used to timestamp NTP packet I/O. It
+    feeds the offset, so a coarse reading here blows the residual gate
+    even when the capture clock is fine.
+
+``measured_sleep_granularity``
+    The shortest sleep this process can take. Windows rounds sleeps up
+    to the system timer tick — ~15.6 ms by default, ~1 ms once something
+    has called ``timeBeginPeriod``. This does **not** corrupt any
+    timestamp: both timing clocks are QPC-derived and tick independent.
+    It stretches whatever waits, so a ``drift_sample_spacing`` of 50 ms
+    becomes 62.5 ms on a coarse tick and the pause budget an experiment
+    reasons about is wrong by more than it expects. Reported, never
+    warned about, and deliberately excluded from ``clocks_ok`` — warning
+    on it would train people to ignore a warning that *does* mean a
+    corrupted recording.
+
+``clock_report()`` records what the running session got.
+``python -m egi_pynetstation.check_clocks --compare`` is the tool for
+finding out *what* should have raised the resolution: it measures the
+clocks as launched, then after importing PsychoPy, then after calling
+``timeBeginPeriod(1)`` directly.
 
 What healthy looks like
 -----------------------

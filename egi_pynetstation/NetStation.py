@@ -583,6 +583,16 @@ class NetStation(object):
         # a send_event() racing connect() could start a second sender and
         # orphan the first on a queue nobody writes to.
         self._ensure_event_sender()
+        # Its own statement, not an argument inside the dict below. This
+        # call is also what warms the Windows precise-clock path -- the
+        # first precise_system_time() imports ctypes, loads kernel32 and
+        # resolves GetSystemTimePreciseAsFileTime -- and that cost belongs
+        # here rather than on the first NTP query in begin_rec(). Inlined
+        # it would still run (a dict argument is evaluated before
+        # _append_error_log() can early-return on a missing log file), but
+        # only by accident, and the next person to tidy the dict would
+        # silently drop both the warm-up and the coarse-clock warning.
+        clocks = self._check_clock_resolution()
         # A header line so a log file is self-describing: which amplifier,
         # which settings, which package version produced these records.
         self._append_error_log({
@@ -597,7 +607,7 @@ class NetStation(object):
             'drift_samples_per_call': self._drift_samples_per_call,
             'drift_slew': self._drift_slew,
             'drift_max_model_age': self._drift_max_model_age,
-            'clocks': self._check_clock_resolution(),
+            'clocks': clocks,
             'clock': None,
         })
         if handshake:
