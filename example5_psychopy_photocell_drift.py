@@ -648,7 +648,13 @@ def main(argv=None) -> int:
             print(f'Simulating {args.prep:g} s of pre-sync prep...')
             deadline = time.monotonic() + args.prep
             while time.monotonic() < deadline:
-                time.sleep(min(1.0, deadline - time.monotonic()))
+                remaining = deadline - time.monotonic()
+                # Under --drift-cooperative the background sampler is off,
+                # so nothing samples unless this loop asks. Without this
+                # the whole prep window would silently collect nothing.
+                if args.drift_cooperative:
+                    ns.sample_drift_if_due(available_pause=remaining)
+                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
             print(f'  {len(ns.drift_history())} pre-sync drift samples.')
         # begin_rec() rather than send_command('BeginRecording'):
         # send_command() is the non-strict diagnostic path, so a refused
