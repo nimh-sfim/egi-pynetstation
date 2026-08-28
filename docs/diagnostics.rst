@@ -31,6 +31,9 @@ Related accessors:
   configuration is recoverable later. See :doc:`drift`.
 * :meth:`~egi_pynetstation.NetStation.NetStation.clock_report` — which
   clocks this process actually uses and what resolution they measured.
+* :meth:`~egi_pynetstation.NetStation.NetStation.drift_ready` — whether
+  the correction can be trusted right now, and if not, why. See
+  :doc:`drift`. ``wait_for_drift()`` blocks until it can.
 
 Clock report
 ------------

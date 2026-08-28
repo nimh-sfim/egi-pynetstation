@@ -1,6 +1,9 @@
 #macos
 .DS_Store
 
+# Swift Package Manager
+.build/
+
 # vim swap-files
 *.swp
 

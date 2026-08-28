@@ -2095,6 +2095,243 @@ class NetStation(object):
             'sample': self.sample_drift(),
         }
 
+    # Below this, the outstanding level error is smaller than the
+    # run-to-run scatter of the measurement itself (a photocell validation
+    # on settled hardware gives ~0.46 ms SD), so waiting for it to retire
+    # further is waiting for something unobservable.
+    DEFAULT_MAX_PENDING = 0.001
+
+    def _outstanding_level_error(self, active: dict, model_age: float):
+        """Level error the slew has not retired yet, in seconds.
+
+        ``clock_state()['drift_pending_error']`` is the error measured when
+        the fit was activated. What matters to a caller asking whether
+        timestamps are trustworthy *now* is how much of it is still
+        outstanding, which depends on how long the slew has been running.
+        Mirrors the retirement arithmetic in
+        :meth:`_predict_active_ntp_offset`.
+        """
+        error = active.get('error', 0.0)
+        slew = active.get('slew', 0.0)
+        if slew <= 0 or error == 0.0 or model_age is None:
+            return 0.0
+        dt = max(0.0, model_age)
+        if error > 0:
+            return error - min(error, slew * dt)
+        return error - max(error, -slew * dt)
+
+    def drift_ready(
+        self,
+        max_pending: float = None,
+        max_model_age: float = None,
+        max_sample_age: float = None,
+    ) -> dict:
+        """Whether the drift correction can be trusted at this instant.
+
+        This is a *readiness* check, and deliberately not the same question
+        as :meth:`session_summary`, which reports whether anything went
+        wrong during a session. Two differences matter. A failed event send
+        makes ``session_summary()['ok']`` False without saying anything
+        about whether the clock is currently right; and ``ok`` becomes True
+        the moment a first fit is accepted, including while the slew is
+        still retiring a level error of several milliseconds. This method
+        reports ``settling`` for that interval, because during it the
+        applied correction is knowingly incomplete.
+
+        Nothing in the package requires this call. An experiment that does
+        not want to wait can ignore it entirely, or read it once and
+        proceed regardless -- the correction engages on its own schedule
+        either way. It exists so that an experiment which *wants* to know
+        does not have to assemble the answer from :meth:`clock_state`.
+
+        Parameters
+        ----------
+        max_pending : float, optional
+            Largest outstanding level error, in seconds, still considered
+            ready. Defaults to :attr:`DEFAULT_MAX_PENDING` (1 ms).
+        max_model_age : float, optional
+            Largest age of the active fit, in seconds, still considered
+            ready. Defaults to ``drift_max_model_age``, the point past
+            which the package itself stops extrapolating the slope.
+        max_sample_age : float, optional
+            Largest interval since a successful NTP sample. Defaults to
+            the package's own staleness threshold.
+
+        Returns
+        -------
+        dict
+            ``ready`` (bool) and ``reason`` (None when ready, otherwise one
+            of ``disabled``, ``not_synced``, ``warming_up``, ``settling``,
+            ``stalled``, ``model_expired``, ``sampling_expired``),
+            together with the quantities behind the verdict:
+            ``pending_correction_ms`` -- how far the applied correction is
+            currently from the fitted level, i.e. how wrong an event
+            timestamp taken now may be; ``model_age_s``;
+            ``seconds_since_sample``; ``slope_ms_per_hour``; ``samples``;
+            ``span_s``; and ``estimated_seconds_remaining``, a *rough*
+            forecast of when the current reason should clear, or None where
+            it cannot be forecast.
+
+        Notes
+        -----
+        Takes ``_clock_lock``. Do not call it from a screen-flip callback;
+        read it between trials, or before the first one.
+
+        See Also
+        --------
+        wait_for_drift : Block until this returns ready.
+        """
+        health = self._ntp_sampling_health()
+        if max_pending is None:
+            max_pending = self.DEFAULT_MAX_PENDING
+
+        with self._clock_lock:
+            correction = self._drift_correction
+            synced = self._syncepoch is not None
+            active = self._drift_active_model
+            stalled = self._drift_stalled
+            reject_reason = self._drift_last_reject_reason
+            model = self._drift_model
+            interval = self._auto_drift_interval
+            min_samples = self._drift_min_samples
+            min_span = self._drift_min_span
+            slew = self._drift_slew
+            age_limit = (
+                self._drift_max_model_age if max_model_age is None
+                else max_model_age
+            )
+            model_age = (
+                None if active is None or self._sync_monotonic is None
+                else (ntp_monotonic_time() - self._sync_monotonic
+                      - active['anchor_elapsed'])
+            )
+            outstanding = (
+                0.0 if active is None
+                else self._outstanding_level_error(active, model_age)
+            )
+            samples = self._valid_drift_samples(windowed=True)
+            span = (
+                0.0 if len(samples) < 2
+                else samples[-1]['elapsed'] - samples[0]['elapsed']
+            )
+            n_samples = len(samples)
+            slope = None if active is None else active['slope']
+
+        sample_age = health['ntp_seconds_since_success']
+        age_threshold = (
+            health['ntp_staleness_threshold'] if max_sample_age is None
+            else max_sample_age
+        )
+
+        verdict = {
+            'ready': False,
+            'reason': None,
+            'pending_correction_ms': abs(outstanding) * 1000.0,
+            'model_age_s': model_age,
+            'seconds_since_sample': sample_age,
+            'slope_ms_per_hour': slope_ms_per_hour(slope),
+            'samples': n_samples,
+            'span_s': span,
+            'estimated_seconds_remaining': None,
+        }
+
+        # Ordered most fundamental first, so the reason names the thing a
+        # caller would have to fix, not a symptom further downstream.
+        if not correction:
+            verdict['reason'] = 'disabled'
+        elif not synced:
+            verdict['reason'] = 'not_synced'
+        elif active is None:
+            verdict['reason'] = 'warming_up'
+            if model is None and not stalled:
+                # Forecast whichever gate is further away. Both have to be
+                # satisfied, and they are satisfied at different times.
+                by_count = max(0, min_samples - n_samples) * interval
+                by_span = max(0.0, min_span - span)
+                verdict['estimated_seconds_remaining'] = max(by_count, by_span)
+        elif stalled:
+            verdict['reason'] = 'stalled'
+        elif age_limit and model_age is not None and model_age > age_limit:
+            verdict['reason'] = 'model_expired'
+        elif health['ntp_sampling_stale'] or (
+            sample_age is not None and age_threshold
+            and sample_age > age_threshold
+        ):
+            verdict['reason'] = 'sampling_expired'
+        elif abs(outstanding) > max_pending:
+            verdict['reason'] = 'settling'
+            if slew > 0:
+                verdict['estimated_seconds_remaining'] = (
+                    (abs(outstanding) - max_pending) / slew
+                )
+        else:
+            verdict['ready'] = True
+
+        if verdict['reason'] in ('warming_up', 'stalled'):
+            verdict['last_reject_reason'] = reject_reason
+        return verdict
+
+    def wait_for_drift(
+        self,
+        timeout: float = 300.0,
+        poll: float = 1.0,
+        on_wait=None,
+        **ready_options,
+    ) -> dict:
+        """Block until :meth:`drift_ready` reports ready, or time out.
+
+        Returns the final verdict either way, with ``timed_out`` added, so
+        a caller can decide for itself whether to proceed. Timing out is
+        not an error and does not raise: an experiment may perfectly well
+        choose to start uncorrected, and the verdict says what it is
+        starting with.
+
+        Parameters
+        ----------
+        timeout : float
+            Seconds to wait before giving up. Use 0 to poll once.
+        poll : float
+            Seconds between checks.
+        on_wait : callable, optional
+            Called with the current verdict on each check, before
+            sleeping. The verdict carries ``seconds_waited`` and
+            ``seconds_remaining`` so a display can show a countdown; use
+            it to keep a PsychoPy window responsive, or to print progress.
+            Exceptions from it propagate, so raising is how a caller
+            cancels the wait.
+        **ready_options
+            Passed through to :meth:`drift_ready`.
+
+        Notes
+        -----
+        This blocks, so never call it from a screen-flip callback or
+        anywhere inside a stimulus loop.
+        """
+        if timeout < 0:
+            raise ValueError('timeout must be non-negative')
+        if poll <= 0:
+            raise ValueError('poll must be positive')
+
+        started = ntp_monotonic_time()
+        while True:
+            verdict = self.drift_ready(**ready_options)
+            waited = ntp_monotonic_time() - started
+            verdict['seconds_waited'] = waited
+            verdict['seconds_remaining'] = max(0.0, timeout - waited)
+            if verdict['ready']:
+                verdict['timed_out'] = False
+                if on_wait is not None:
+                    on_wait(verdict)
+                return verdict
+            if waited >= timeout:
+                verdict['timed_out'] = True
+                if on_wait is not None:
+                    on_wait(verdict)
+                return verdict
+            if on_wait is not None:
+                on_wait(verdict)
+            time.sleep(min(poll, max(0.0, timeout - waited)))
+
     def session_summary(self) -> dict:
         """One-call, human-checkable report of how the session's clock behaved.
 

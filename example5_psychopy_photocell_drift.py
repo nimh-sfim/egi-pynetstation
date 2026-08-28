@@ -280,15 +280,19 @@ def warm_up_before_trials(
         win.flip()
 
     elapsed = ns.capture_time() - started
-    state = ns.clock_state()
-    model_status = (
-        'engaged' if state.get('active_drift_slope') is not None
-        else 'not yet engaged'
-    )
+    # A fixed duration, deliberately: comparing runs needs the warm-up to
+    # be the same length every time. An experiment should prefer
+    # ns.wait_for_drift(), which waits for the condition rather than a
+    # guess. Report the readiness verdict either way, so a run says
+    # whether its warm-up actually achieved anything.
+    status = ns.drift_ready()
     print(
         f'Warmup complete after {elapsed:.1f} s: '
-        f'{state.get("drift_valid_samples", 0)} valid drift samples, '
-        f'model {model_status}.'
+        f'{status["samples"]} valid drift samples over '
+        f'{status["span_s"]:.0f} s, '
+        + ('model ready.' if status['ready']
+           else f'model NOT ready ({status["reason"]}, '
+                f'{status["pending_correction_ms"]:.2f} ms pending).')
     )
     return elapsed
 

@@ -235,6 +235,103 @@ offset it anchors on is current: in simulation against the measured
 (23 s of slew) to 0.016 ms. A session that begins recording cold still
 pays the ramp.
 
+Knowing when the correction is trustworthy
+------------------------------------------
+
+``drift_ready()`` answers, in one call, whether the correction can be
+trusted at this instant. It never blocks and nothing requires you to call
+it -- correction engages on its own schedule regardless.
+
+.. code-block:: python
+
+    status = ns.drift_ready()
+    if not status['ready']:
+        print(f"starting uncorrected: {status['reason']}")
+
+``ready`` is a bool and ``reason`` is None when ready, otherwise one of:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
+
+   * - ``reason``
+     - Meaning
+   * - ``disabled``
+     - ``drift_correction=False``; there is no correction to be ready.
+   * - ``not_synced``
+     - ``begin_rec()`` has not run, so no timestamp epoch exists.
+   * - ``warming_up``
+     - No fit accepted yet. Waiting will fix this.
+   * - ``settling``
+     - A fit is active, but the slew has not finished applying its level.
+       Timestamps are knowingly incomplete by ``pending_correction_ms``.
+   * - ``stalled``
+     - Fits are being rejected. Waiting will not fix this; see
+       ``last_reject_reason``.
+   * - ``model_expired``
+     - The active fit is older than ``drift_max_model_age``.
+   * - ``sampling_expired``
+     - No NTP sample has succeeded recently. Check the network.
+
+The verdict also carries ``pending_correction_ms`` -- how far the applied
+correction currently sits from the fitted level, which is how wrong an
+event timestamp taken now may be -- along with ``model_age_s``,
+``seconds_since_sample``, ``slope_ms_per_hour``, ``samples``, ``span_s``,
+and ``estimated_seconds_remaining``, a rough forecast of when the current
+reason should clear.
+
+.. note::
+
+   This is not the same question as ``session_summary()['ok']``, which
+   reports whether anything went *wrong* during a session. That becomes
+   True the moment a first fit is accepted -- including while the slew is
+   still retiring several milliseconds of level error. ``drift_ready()``
+   reports ``settling`` for exactly that interval.
+
+Waiting for it
+^^^^^^^^^^^^^^
+
+``wait_for_drift()`` blocks until ready, or until it times out. Timing out
+is not an error and does not raise: starting uncorrected is a legitimate
+choice, and the returned verdict says what you are starting with.
+
+.. code-block:: python
+
+    ns.begin_rec()
+    status = ns.wait_for_drift(timeout=300)
+    if status['timed_out']:
+        print(f"proceeding uncorrected: {status['reason']}")
+
+With a real preparation window this returns immediately. Without one it
+waits out the sampling gates and says so, which is the difference between
+warming up and hoping.
+
+Never call it from a screen-flip callback or inside a stimulus loop. Both
+methods take the clock lock, and ``wait_for_drift()`` blocks by design.
+
+Showing progress
+^^^^^^^^^^^^^^^^
+
+``on_wait`` is called with the current verdict on every poll, with
+``seconds_waited`` and ``seconds_remaining`` added, so a countdown can be
+printed or drawn. Raising from it cancels the wait.
+
+.. code-block:: python
+
+    def report(status):
+        eta = status['estimated_seconds_remaining']
+        eta = 'unknown' if eta is None else f'~{eta:.0f} s'
+        print(
+            f"  clock model: {status['reason']}"
+            f"  pending {status['pending_correction_ms']:.2f} ms"
+            f"  ready in {eta}",
+            end='\r',
+        )
+
+    ns.wait_for_drift(timeout=300, poll=1.0, on_wait=report)
+
+For an on-screen version in PsychoPy, see :ref:`psychopy-drift-countdown`.
+
 How often to sample
 -------------------
 

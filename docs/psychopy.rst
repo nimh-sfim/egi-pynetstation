@@ -125,6 +125,54 @@ flip callback marks the flip, and calling it from your trial loop marks
 that line of code — both are equally precise. Returns ``None``; pass
 ``wait=True`` only if you need the amplifier's reply.
 
+.. _psychopy-drift-countdown:
+
+Showing warm-up progress on screen
+-----------------------------------
+
+``wait_for_drift()`` calls ``on_wait`` on every poll, which is where a
+PsychoPy experiment both redraws the window and keeps it responsive. The
+callback receives the current verdict plus ``seconds_waited`` and
+``seconds_remaining``.
+
+.. code-block:: python
+
+    from psychopy import core, event, visual
+
+    message = visual.TextStim(win, text='', height=0.04)
+
+    def show_progress(status):
+        if event.getKeys(keyList=['escape']):
+            raise KeyboardInterrupt
+        eta = status['estimated_seconds_remaining']
+        if status['ready']:
+            body = 'Clock model ready.'
+        elif eta is not None:
+            body = f'Preparing clock model\u2014about {eta:.0f} s remaining'
+        else:
+            body = f'Waiting on clock model ({status["reason"]})'
+        message.text = f'{body}\n\nPress escape to skip'
+        message.draw()
+        win.flip()          # also paces the loop; do not sleep here
+
+    status = ns.wait_for_drift(timeout=300, poll=1.0, on_wait=show_progress)
+    if not status['ready']:
+        print(f'Starting uncorrected: {status["reason"]}')
+
+Three things are worth copying from this. ``win.flip()`` inside the
+callback both draws the frame and blocks until the next refresh, so the
+loop neither busy-spins nor needs a sleep of its own. Polling for escape
+and raising cancels the wait, which is what a participant-facing screen
+needs. And the return value is checked rather than assumed: if the wait
+times out the experiment still runs, and the reason is recorded.
+
+If you would rather not wait at all, ``drift_ready()`` gives the same
+verdict without blocking, and can simply be logged beside your data:
+
+.. code-block:: python
+
+    record['clock_ready'] = ns.drift_ready()['ready']
+
 .. _manual-drift-sampling:
 
 Optional: only after disabling background sampling

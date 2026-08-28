@@ -393,3 +393,176 @@ def test_presync_samples_do_not_accumulate_rejected_fits():
     assert len(ns._drift_history) == 80
     assert ns._drift_rejected_fits == 0
     assert ns._drift_last_reject_reason is None
+
+
+# --- readiness -----------------------------------------------------------
+
+def ready_station(pending=0.0, model_age=0.0, slew=0.0002):
+    """A station with an active model whose level error is `pending`."""
+    ns = make_station()
+    ns._syncepoch = 0.0
+    ns._ntp_last_success_monotonic = netstation_module.time.monotonic()
+    ns._sync_monotonic = netstation_module.ntp_monotonic_time() - model_age
+    ns._drift_active_model = {
+        'model_id': ('x',),
+        'slope': -155e-3 / 3600.0,
+        'anchor_elapsed': 0.0,
+        'anchor_offset': 0.0,
+        'raw_anchor_offset': pending,
+        'error': pending,
+        'slew': slew,
+        'activated_local_time': 0.0,
+    }
+    ns._drift_accepted_fits = 1
+    return ns
+
+
+def test_readiness_reports_disabled_before_anything_else():
+    ns = ready_station()
+    ns.set_drift_correction(False)
+    assert ns.drift_ready()['reason'] == 'disabled'
+
+
+def test_readiness_reports_not_synced_before_the_clock_epoch_exists():
+    ns = ready_station()
+    ns._syncepoch = None
+    assert ns.drift_ready()['reason'] == 'not_synced'
+
+
+def test_readiness_reports_warming_up_with_no_model():
+    ns = make_station()
+    ns._syncepoch = 0.0
+    verdict = ns.drift_ready()
+    assert verdict['ready'] is False
+    assert verdict['reason'] == 'warming_up'
+    # Nothing collected yet: the full count gate at the sampling interval.
+    assert verdict['estimated_seconds_remaining'] == pytest.approx(
+        ns.drift_settings()['drift_min_samples']
+        * ns.drift_settings()['auto_drift_interval']
+    )
+
+
+def test_readiness_forecasts_whichever_gate_is_further_away():
+    """Both gates must be satisfied, and they clear at different times."""
+    ns = make_station()
+    ns._syncepoch = 0.0
+    ns.set_drift_requirements(min_samples=4, min_span=300.0)
+    ns.configure_auto_drift(interval=10.0)
+    # Four samples already, but only 30 s of span: the span gate is later.
+    for index in range(4):
+        add_drift_sample(ns, index * 10.0, 0.0)
+    verdict = ns.drift_ready()
+    assert verdict['reason'] == 'warming_up'
+    assert verdict['estimated_seconds_remaining'] == pytest.approx(270.0)
+
+
+def test_readiness_reports_settling_while_the_slew_still_owes_correction():
+    """The interval session_summary() calls healthy but timestamps are not.
+
+    A fit has been accepted, so 'ok' is True, but several milliseconds of
+    level error have not been applied yet.
+    """
+    ns = ready_station(pending=0.0072, model_age=0.0)
+    verdict = ns.drift_ready()
+    assert verdict['ready'] is False
+    assert verdict['reason'] == 'settling'
+    assert verdict['pending_correction_ms'] == pytest.approx(7.2)
+    # 7.2 ms less the 1 ms tolerance, retired at 0.2 ms/s.
+    assert verdict['estimated_seconds_remaining'] == pytest.approx(31.0)
+    assert ns.session_summary()['ok'] is True
+
+
+def test_readiness_clears_once_the_slew_has_retired_the_error():
+    ns = ready_station(pending=0.0072, model_age=40.0)
+    verdict = ns.drift_ready()
+    assert verdict['pending_correction_ms'] == pytest.approx(0.0)
+    assert verdict['ready'] is True
+    assert verdict['reason'] is None
+
+
+def test_readiness_honours_a_caller_supplied_pending_tolerance():
+    ns = ready_station(pending=0.0072, model_age=0.0)
+    assert ns.drift_ready(max_pending=0.010)['ready'] is True
+    assert ns.drift_ready(max_pending=0.001)['reason'] == 'settling'
+
+
+def test_readiness_reports_a_stalled_model():
+    ns = ready_station()
+    ns._drift_stalled = True
+    ns._drift_last_reject_reason = 'high_residual'
+    verdict = ns.drift_ready()
+    assert verdict['reason'] == 'stalled'
+    assert verdict['last_reject_reason'] == 'high_residual'
+
+
+def test_readiness_reports_stalled_before_settling():
+    ns = ready_station(pending=0.0072, model_age=0.0)
+    ns._drift_stalled = True
+    assert ns.drift_ready()['reason'] == 'stalled'
+
+
+def test_readiness_reports_a_model_older_than_extrapolation_allows():
+    ns = ready_station(model_age=900.0)
+    ns.set_drift_stability(max_model_age=600.0)
+    assert ns.drift_ready()['reason'] == 'model_expired'
+
+
+def test_readiness_reports_expired_model_before_settling():
+    ns = ready_station(pending=0.0072, model_age=900.0)
+    ns.set_drift_stability(max_model_age=600.0)
+    assert ns.drift_ready()['reason'] == 'model_expired'
+
+
+def test_readiness_reports_stale_sampling():
+    ns = ready_station()
+    ns._ntp_last_success_monotonic = (
+        netstation_module.time.monotonic() - 10_000.0
+    )
+    assert ns.drift_ready()['reason'] == 'sampling_expired'
+
+
+def test_wait_returns_at_once_when_already_ready():
+    ns = ready_station()
+    verdict = ns.wait_for_drift(timeout=30.0, poll=5.0)
+    assert verdict['ready'] is True
+    assert verdict['timed_out'] is False
+
+
+def test_wait_times_out_without_raising_and_says_what_it_saw():
+    """Starting uncorrected is a legitimate choice, not an error."""
+    ns = ready_station(pending=1.0)
+    verdict = ns.wait_for_drift(timeout=0.0, poll=0.1)
+    assert verdict['timed_out'] is True
+    assert verdict['ready'] is False
+    assert verdict['reason'] == 'settling'
+
+
+def test_wait_gives_the_callback_what_a_countdown_needs():
+    ns = ready_station(pending=1.0)
+    seen = []
+    ns.wait_for_drift(timeout=0.3, poll=0.1, on_wait=seen.append)
+    assert len(seen) >= 2
+    for verdict in seen:
+        assert 'seconds_waited' in verdict
+        assert 'seconds_remaining' in verdict
+        assert verdict['reason'] == 'settling'
+    assert seen[-1]['seconds_waited'] >= seen[0]['seconds_waited']
+    assert seen[-1]['seconds_remaining'] <= seen[0]['seconds_remaining']
+
+
+def test_wait_can_be_cancelled_by_raising_from_the_callback():
+    ns = ready_station(pending=1.0)
+
+    def cancel(verdict):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        ns.wait_for_drift(timeout=30.0, poll=0.1, on_wait=cancel)
+
+
+def test_wait_rejects_nonsense_arguments():
+    ns = ready_station()
+    with pytest.raises(ValueError):
+        ns.wait_for_drift(timeout=-1.0)
+    with pytest.raises(ValueError):
+        ns.wait_for_drift(poll=0.0)
