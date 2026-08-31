@@ -20,7 +20,7 @@ Minimal experiment
 
 .. code-block:: python
 
-   from psychopy import core, visual
+   from psychopy import event, visual
    from egi_pynetstation import NetStation
 
    win = visual.Window(fullscr=True, color='black')
@@ -34,7 +34,9 @@ Minimal experiment
            stimulus.draw()
            win.callOnFlip(ns.send_event, event_type='stim')
            win.flip()
-           core.wait(1.0)
+
+           key = event.waitKeys(keyList=['space'])[0]
+           ns.send_event(event_type='resp', label=key)
        finally:
            ns.end_rec()
    finally:
