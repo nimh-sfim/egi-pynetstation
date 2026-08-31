@@ -26,6 +26,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sample dropped before it can corrupt a fit, and a periodic
   `drift_model_status` heartbeat so a quiet log still carries model state.
 
+### Changed
+
+- Reorganized the documentation around a short five-command quickstart and a
+  required per-setup Timing Test, with optional drift warmup, tuning, timing
+  internals, diagnostics, and platform details separated from the basic API.
+
 ### Fixed
 
 - The photocell CSV schema now retains session identifiers and staged-model
