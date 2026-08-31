@@ -1,6 +1,40 @@
 Quickstart
 ==========
 
+Automatic clock-offset correction
+---------------------------------
+
+This package automatically tracks and corrects changes in the clock offset
+between the EGI amplifier and the stimulus computer. You may still manage NTP
+timing manually, but automatic background sampling performed better in our
+tests, so it is enabled by default.
+
+Background sampling starts when ``connect()`` is called. The conservative,
+stable model requires at least 13 valid samples spanning at least 180 seconds.
+Call ``connect()`` early--for example, while measuring impedances or showing
+participant instructions--so that this time overlaps with participant setup.
+On M-series macOS devices, we found that the drift during these 180 seconds
+was less than 2ms, and thus did not see reason to ensure the model was active
+when the recording began or stimuli were presented. 
+
+However, on some configuations of Windows, we found the early jitter to be
+incompatible with timing needed for robust ERP analysis. If waiting for the 
+stable model is too long, enable the provisional warm-up model:
+
+.. code-block:: python
+
+   ns.connect(ntp_ip=amp_ip, drift_warmup=True)
+
+The provisional model requires at least five valid samples spanning at least
+20 seconds. The stable model continues accumulating evidence in the background
+and automatically takes over after its 180-second gates are met. In our tests,
+the provisional model remained reliable until that takeover.
+
+These durations are minimum evidence windows, not guarantees: rejected or
+delayed NTP samples can extend them. Test the complete experiment with a
+photocell or microswitch to verify the offsets on the specific stimulus
+computer and EGI setup. 
+
 The normal lifecycle
 --------------------
 
@@ -71,6 +105,8 @@ End one recording before starting the next:
 
 .. code-block:: python
 
+   ns.connect()
+   ...
    ns.begin_rec()
    # session 1
    ns.end_rec()
@@ -78,6 +114,8 @@ End one recording before starting the next:
    ns.begin_rec()
    # session 2; the stable drift evidence is retained
    ns.end_rec()
+   ...
+   ns.disconnect()
 
 Do not call ``ntpsync()`` yourself during a recording. ``begin_rec()`` performs
 the sync each recording needs.
