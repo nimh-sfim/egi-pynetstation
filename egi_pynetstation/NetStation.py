@@ -860,6 +860,13 @@ class NetStation(object):
                 sample['elapsed'] = elapsed - shift
         if self._drift_stall_started_elapsed is not None:
             self._drift_stall_started_elapsed -= shift
+        if self._drift_status_last_elapsed is not None:
+            # Heartbeat scheduling uses recording-relative elapsed time just
+            # like the samples above. Leaving this in the previous epoch
+            # suppresses status records until the new recording has run
+            # longer than the old one (run4 produced no heartbeats at all in
+            # its equally sized second recording).
+            self._drift_status_last_elapsed -= shift
         active = self._drift_active_model
         if active is not None:
             # Keep the accepted slope (and its stable/warmup identity), but
@@ -2097,9 +2104,9 @@ class NetStation(object):
             elapsed = None
             if self._sync_monotonic is not None:
                 elapsed = ntp_monotonic_time() - self._sync_monotonic
-            estimate = self._ntp_drift_regression(
-                activation_elapsed=elapsed
-            )
+            # Refit and re-activate as a side effect; the report below
+            # reads the resulting state.
+            self._ntp_drift_regression(activation_elapsed=elapsed)
             report = self.drift_estimate()
         self._flush_pending_log_records()
         return report

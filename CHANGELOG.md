@@ -36,6 +36,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The photocell CSV schema now retains session identifiers and staged-model
   fields instead of silently dropping them as extra dictionary keys.
+- Drift-model status heartbeats now keep their schedule when a second
+  recording starts on the same connection. Previously the heartbeat retained
+  the first recording's elapsed-time coordinate and could remain silent for
+  the whole second recording.
 
 ## [2.1.0] — 2026-08-28
 

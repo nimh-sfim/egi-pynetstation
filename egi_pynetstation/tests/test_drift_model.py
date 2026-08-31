@@ -728,6 +728,29 @@ def test_status_heartbeat_is_emitted_on_its_interval(tmp_path):
     assert 'outstanding_level_error_ms' in status[0]
 
 
+def test_status_heartbeat_interval_survives_epoch_rebase(tmp_path):
+    """A second recording must not inherit the first epoch's elapsed clock."""
+    ns = _logged_station(tmp_path)
+    ns.set_drift_monitoring(status_interval=100.0)
+    add_drift_sample(ns, 0.0, 0.000)
+    add_drift_sample(ns, 10.0, 0.010)  # engage and seed at elapsed=10
+    add_drift_sample(ns, 120.0, 0.120)  # first heartbeat
+    assert len(_records(ns, 'drift_model_status')) == 1
+
+    # Recording 2 starts 200 seconds after recording 1. Every retained
+    # elapsed coordinate, including the heartbeat clock, moves back 200 s.
+    ns._recording_count = 2
+    ns._rebase_drift_epoch(1200.0, 0.200)
+    ns._sync_monotonic = 1200.0
+    ns._offset_mono = 0.200
+    assert ns._drift_status_last_elapsed == pytest.approx(-80.0)
+
+    # 110 seconds have passed since the prior heartbeat in the translated
+    # coordinate system, so recording 2 must emit on its ordinary schedule.
+    add_drift_sample(ns, 30.0, 0.230)
+    assert len(_records(ns, 'drift_model_status')) == 2
+
+
 def test_disabling_the_outlier_bound_lets_a_spike_through(tmp_path):
     ns = _logged_station(tmp_path)
     ns.set_drift_monitoring(sample_reject_offset=0)
