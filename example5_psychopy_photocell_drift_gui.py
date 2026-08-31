@@ -28,10 +28,11 @@ def default_log_paths() -> tuple:
     return (
         str(log_dir / f'psychopy_photocell_{stamp}.csv'),
         str(log_dir / f'psychopy_photocell_errors_{stamp}.jsonl'),
+        str(log_dir / f'psychopy_frame_intervals_{stamp}.csv'),
     )
 
 
-CSV_LOG, ERROR_LOG = default_log_paths()
+CSV_LOG, ERROR_LOG, FRAME_INTERVAL_LOG = default_log_paths()
 
 # (key, label, default, option, kind)
 #   kind 'value'  -> passed as "--option value" when not blank
@@ -46,7 +47,12 @@ FIELDS = [
     ('port', 'ECI port', '', '--port', 'value'),
 
     ('__section__', 'Timing', None, None, 'section'),
-    ('duration_s', 'Duration (s)', 300.0, '--duration', 'value'),
+    # Each session lasts ten minutes, putting the 180 s stable-model promotion
+    # comfortably inside session 1 before the same connection starts session 2.
+    ('duration_s', 'Duration per session (s)', 600.0,
+     '--duration', 'value'),
+    ('sessions', 'Sessions on this connection', 2,
+     '--sessions', 'value'),
     ('warmup_s', 'Clock warmup before trial 1 (s)', 0.0,
      '--warmup', 'value'),
     ('dot_duration_s', 'Dot duration (s)', 0.100, '--dot-duration', 'value'),
@@ -61,6 +67,17 @@ FIELDS = [
      '--drift-min-samples', 'value'),
     ('drift_min_span_s', 'Drift min span (s; blank = package default)', '',
      '--drift-min-span', 'value'),
+    ('staged_drift', 'Short model first, then stable long model', True,
+     '--staged-drift', 'flag'),
+    ('warmup_model_min_samples',
+     'Short-model min samples (blank = default)', '',
+     '--warmup-model-min-samples', 'value'),
+    ('warmup_model_min_span_s',
+     'Short-model min span (s; blank = default)', '',
+     '--warmup-model-min-span', 'value'),
+    ('warmup_sample_interval_s',
+     'Short-model sample interval (s; blank = default)', '',
+     '--warmup-sample-interval', 'value'),
     ('drift_max_delay_s', 'Reject NTP delay above (s; blank = default)', '',
      '--drift-max-delay', 'value'),
     ('drift_max_residual_s', 'Reject fit residual above (s; blank = default)', '',
@@ -104,6 +121,8 @@ FIELDS = [
     ('debug_eci', 'Debug ECI traffic', False, '--debug', 'flag'),
     ('csv_log', 'CSV log path', CSV_LOG, '--log', 'value'),
     ('error_log', 'Error log path', ERROR_LOG, '--error-log', 'value'),
+    ('frame_interval_log', 'Frame interval CSV path', FRAME_INTERVAL_LOG,
+     '--frame-interval-log', 'value'),
 ]
 
 MODE_CHOICES = ['amp', 'local', 'custom']

@@ -153,9 +153,10 @@ thread takes NTP samples on its own; there is nothing to wire up.
 [Drift correction](docs/drift.rst).
 
 **Use exactly one ECI clock sync per recording.** `begin_rec()` performs it.
-Calling `ntpsync()` again to "keep the clock fresh" re-bases the event
-timestamp epoch and is refused unless you pass `force=True` for diagnostics.
-One `NetStation` object records once, for the same reason.
+Calling `ntpsync()` again to "keep the clock fresh" re-bases that recording's
+event timestamp epoch and is refused unless you pass `force=True` for
+diagnostics. You may call `end_rec()` and `begin_rec()` again on the same
+connection; retained drift samples are translated to the new recording epoch.
 
 **A non-blocking send cannot report its own failure.** `send_event()` returns
 `None` immediately — that is what makes it safe in a flip callback, but it
@@ -216,6 +217,8 @@ ns.set_drift_sampling(samples=4, spacing=0.05)
 #   ns.connect(ntp_ip=..., **{'drift_min_samples': 7})
 ns.set_drift_correction(True)
 ns.set_drift_requirements(min_samples=13, min_span=180.0)
+ns.set_drift_warmup(enabled=True, min_samples=5, min_span=20.0,
+                    interval=5.0)     # optional short model, then stable
 ns.set_drift_model_options(max_delay=0.010, max_residual=0.003,
                            window_minutes=15.0)
 ns.set_drift_stability(slew=0.0002, max_model_age=600.0, stall_after=5)

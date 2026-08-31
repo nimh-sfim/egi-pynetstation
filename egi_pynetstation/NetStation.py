@@ -187,6 +187,14 @@ class NetStation(object):
         # until shorter windows have been validated on both Windows and macOS.
         self._drift_min_samples = 13
         self._drift_min_span = 180.0
+        # Optional two-stage fitting. The provisional model reduces the
+        # uncorrected startup window; the ordinary 180-second model remains
+        # the quality target and permanently takes over once it is accepted.
+        self._drift_warmup = False
+        self._drift_warmup_min_samples = 5
+        self._drift_warmup_min_span = 20.0
+        self._drift_warmup_interval = 5.0
+        self._drift_stable_engaged = False
         self._drift_max_delay = 0.010
         self._drift_max_residual = 0.003
         self._drift_window = 15 * 60.0
@@ -214,6 +222,31 @@ class NetStation(object):
         self._drift_stall_after = 5
         self._drift_stalled = False
         self._drift_stall_started_elapsed = None
+        # Post-promotion monitoring. The gates above only decide whether a
+        # *fit* is accepted; once a model is engaged nothing watches whether
+        # the offsets it is being fed still agree with what it predicts. A
+        # sustained level excursion (the model right but the world shifting
+        # under it) or a one-shot spike would otherwise pass without a
+        # trace. These three watch for that.
+        #
+        # Level excursion: a sample whose measured offset sits more than
+        # this far from the active model's prediction. Logged on entry and
+        # on recovery, hysteresis like the sampling-failure detector, so a
+        # 40 s excursion is two records rather than one per sample.
+        self._drift_excursion_threshold = 0.005
+        self._drift_excursion_reported = False
+        self._drift_excursion_started_elapsed = None
+        self._drift_excursion_peak = 0.0
+        # Hard per-sample outlier bound. A sample this far from the model
+        # is not a level shift the model should chase but a glitch (a
+        # multi-second NTP/photocell spike), so it is marked invalid before
+        # it can enter a fit and wreck the slope. None disables the bound.
+        self._drift_sample_reject_offset = 0.1
+        # Heartbeat: emit a status record at least this often while a model
+        # is engaged, so a quiet log still carries the context needed to
+        # place an excursion or a frame drop against model state. None off.
+        self._drift_status_interval = 120.0
+        self._drift_status_last_elapsed = None
         # Drift-transition log records noticed under _clock_lock, parked
         # here so the filesystem write happens outside the lock.
         self._pending_log_records = []
@@ -242,12 +275,11 @@ class NetStation(object):
         # _io_lock, like everything else touching the socket.
         self._rx_buffer = b''
         self._recording_start = None
-        # Whether a recording epoch has already been used on this
-        # connection. begin_rec() re-runs the ECI clock sync, which
-        # re-bases the local event epoch while the drift model still holds
-        # samples measured against the previous one -- so a second epoch
-        # is refused rather than silently mixing two coordinate systems.
+        # Multiple recordings may share one connection. Each begin_rec()
+        # performs a fresh ECI sync; ntpsync() translates retained drift
+        # coordinates into that new epoch before fitting again.
         self._recording_started = False
+        self._recording_count = 0
         # Whether the ECI clock sync that establishes the event timestamp
         # epoch has completed. Set only after the amplifier accepts it.
         self._ntpsynced = False
@@ -349,6 +381,10 @@ class NetStation(object):
         drift_correction: bool = True,
         drift_min_samples: int = None,
         drift_min_span: float = None,
+        drift_warmup: bool = None,
+        drift_warmup_min_samples: int = None,
+        drift_warmup_min_span: float = None,
+        drift_warmup_interval: float = None,
         drift_max_delay: float = None,
         drift_max_residual: float = None,
         drift_window_minutes: float = None,
@@ -382,6 +418,17 @@ class NetStation(object):
         drift_min_span : float, optional
             Minimum sample window, in seconds, needed before applying
             drift correction.
+        drift_warmup : bool, optional
+            Enable a provisional short-baseline model before the ordinary
+            drift model has enough evidence. Once the ordinary model is
+            accepted it permanently takes over for this connection.
+        drift_warmup_min_samples : int, optional
+            Valid samples required by the provisional model (default 5).
+        drift_warmup_min_span : float, optional
+            Sample span required by the provisional model (default 20 s).
+        drift_warmup_interval : float, optional
+            Automatic sampling interval before the ordinary model engages
+            (default 5 s). Afterwards ``auto_drift_interval`` is used.
         drift_max_delay : float, optional
             Maximum NTP round-trip delay, in seconds, for samples used by
             the drift model.
@@ -477,6 +524,10 @@ class NetStation(object):
         drift_options = {
             'min_samples': drift_min_samples,
             'min_span': drift_min_span,
+            'warmup': drift_warmup,
+            'warmup_min_samples': drift_warmup_min_samples,
+            'warmup_min_span': drift_warmup_min_span,
+            'warmup_interval': drift_warmup_interval,
             'max_delay': drift_max_delay,
             'max_residual': drift_max_residual,
             'window_minutes': drift_window_minutes,
@@ -530,6 +581,8 @@ class NetStation(object):
     # its default for the whole session.
     _DRIFT_OPTION_KEYS = frozenset({
         'min_samples', 'min_span',
+        'warmup', 'warmup_min_samples', 'warmup_min_span',
+        'warmup_interval',
         'max_delay', 'max_residual', 'window_minutes',
         'samples', 'spacing', 'presync',
         'slew', 'max_model_age',
@@ -570,6 +623,12 @@ class NetStation(object):
         self.set_drift_requirements(
             min_samples=drift_options['min_samples'],
             min_span=drift_options['min_span'],
+        )
+        self.set_drift_warmup(
+            enabled=drift_options['warmup'],
+            min_samples=drift_options['warmup_min_samples'],
+            min_span=drift_options['warmup_min_span'],
+            interval=drift_options['warmup_interval'],
         )
         self.set_drift_model_options(
             max_delay=drift_options['max_delay'],
@@ -618,12 +677,19 @@ class NetStation(object):
             'drift_correction': self._drift_correction,
             'drift_min_samples': self._drift_min_samples,
             'drift_min_span': self._drift_min_span,
+            'drift_warmup': self._drift_warmup,
+            'drift_warmup_min_samples': self._drift_warmup_min_samples,
+            'drift_warmup_min_span': self._drift_warmup_min_span,
+            'drift_warmup_interval': self._drift_warmup_interval,
             'drift_max_delay': self._drift_max_delay,
             'drift_max_residual': self._drift_max_residual,
             'drift_window': self._drift_window,
             'drift_samples_per_call': self._drift_samples_per_call,
             'drift_slew': self._drift_slew,
             'drift_max_model_age': self._drift_max_model_age,
+            'drift_excursion_threshold': self._drift_excursion_threshold,
+            'drift_sample_reject_offset': self._drift_sample_reject_offset,
+            'drift_status_interval': self._drift_status_interval,
             'clocks': clocks,
             'clock': None,
         })
@@ -657,16 +723,22 @@ class NetStation(object):
             self._drift_model = None
             self._drift_model_dirty = True
             self._drift_active_model = None
+            self._drift_stable_engaged = False
             self._drift_last_reject_reason = None
             self._drift_rejected_fits = 0
             self._drift_accepted_fits = 0
             self._drift_consecutive_rejections = 0
             self._drift_stalled = False
             self._drift_stall_started_elapsed = None
+            self._drift_excursion_reported = False
+            self._drift_excursion_started_elapsed = None
+            self._drift_excursion_peak = 0.0
+            self._drift_status_last_elapsed = None
             self._auto_drift_last_monotonic = None
             self._pending_log_records = []
             self._recording_start = None
             self._recording_started = False
+            self._recording_count = 0
             self._ntpsynced = False
             self._event_errors = []
             self._eci_errors = []
@@ -688,18 +760,21 @@ class NetStation(object):
 
         This sends one ECI ``NTPClockSync`` command using the current offset
         reported by the amplifier/Net Station NTP server. It also stores the
-        first NTP offset sample used by the client-side drift corrector.
+        NTP offset sample used by the client-side drift corrector.
         Repeated ECI clock syncs during a recording can reset the local event
         timestamp epoch and should be avoided for normal experiments, so a
-        second call is refused unless ``force=True``.
+        second direct call is refused unless ``force=True``. A new
+        :meth:`begin_rec` performs a forced sync and safely translates the
+        retained drift history into the new elapsed-time origin.
 
         Parameters
         ----------
         force : bool
             Re-run the sync even though one has already completed. This
-            re-bases the event timestamp epoch mid-recording and
-            invalidates the elapsed-time coordinates every existing drift
-            sample was measured against. Diagnostic use only.
+            re-bases the event timestamp epoch mid-recording. Retained drift
+            coordinates are translated safely, but event times on opposite
+            sides of the sync belong to different recording epochs.
+            Diagnostic use only inside an active recording.
 
         Raises
         ------
@@ -711,10 +786,9 @@ class NetStation(object):
         if self._ntpsynced and not force:
             raise NetStationLifecycleError(
                 'The ECI clock sync has already been performed. Repeating '
-                'it re-bases the event timestamp epoch, so every drift '
-                'sample already collected would be measured against a '
-                'different origin. begin_rec() performs the one sync an '
-                'experiment needs. Pass force=True only for diagnostics.'
+                'it re-bases the active recording timestamp epoch. '
+                'begin_rec() performs the one sync each recording needs. '
+                'Pass force=True only for diagnostics.'
             )
         c = NTPClient()
         response = c.request(self._ntp_ip, version=3)
@@ -743,7 +817,9 @@ class NetStation(object):
             # corrector and getTime() compare against; the two frames must
             # never be mixed.
             self._offset = response.offset
-            self._offset_mono = response.offset + (t - monotonic_t)
+            new_offset_mono = response.offset + (t - monotonic_t)
+            self._rebase_drift_epoch(monotonic_t, new_offset_mono)
+            self._offset_mono = new_offset_mono
             self._syncepoch = t
             self._sync_system_time = t
             self._sync_monotonic = monotonic_t
@@ -758,6 +834,49 @@ class NetStation(object):
             )
         self._flush_pending_log_records()
         return cresponse
+
+    def _rebase_drift_epoch(
+        self,
+        new_sync_monotonic: float,
+        new_offset_mono: float,
+    ) -> None:
+        """Translate retained model coordinates to a fresh sync origin.
+
+        Drift samples store absolute amplifier-versus-monotonic offsets, so
+        changing the elapsed-time origin only translates their x coordinate.
+        The fitted slope is invariant under that translation. The applied
+        model is re-anchored to the new sync observation so correction starts
+        at zero in the new ECI epoch, then slews toward the retained fit.
+
+        Caller must hold ``_clock_lock``.
+        """
+        previous = self._sync_monotonic
+        if previous is None:
+            return
+        shift = new_sync_monotonic - previous
+        for sample in self._drift_history:
+            elapsed = sample.get('elapsed')
+            if elapsed is not None:
+                sample['elapsed'] = elapsed - shift
+        if self._drift_stall_started_elapsed is not None:
+            self._drift_stall_started_elapsed -= shift
+        active = self._drift_active_model
+        if active is not None:
+            # Keep the accepted slope (and its stable/warmup identity), but
+            # establish continuity against the NTP observation that the new
+            # ECI epoch itself was built from.
+            self._drift_active_model = {
+                **active,
+                'model_id': ('epoch_rebase', self._recording_count,
+                             new_sync_monotonic),
+                'anchor_elapsed': 0.0,
+                'anchor_offset': new_offset_mono,
+                'raw_anchor_offset': new_offset_mono,
+                'error': 0.0,
+                'activated_local_time': time.time(),
+            }
+        self._drift_model = None
+        self._drift_model_dirty = True
 
     def _backfill_presync_elapsed(self) -> int:
         """Give pre-sync drift samples an elapsed coordinate. Returns count.
@@ -1038,18 +1157,15 @@ class NetStation(object):
         """
         if not self._ntp_ip:
             raise NetStationNoNTPIP()
-        if self._recording_started:
+        if self._recording_start is not None:
             raise NetStationLifecycleError(
-                'This connection has already recorded. A second '
-                'begin_rec() would re-run the ECI clock sync and re-base '
-                'the event timestamp epoch, while the drift model still '
-                'holds samples measured against the first one. Call '
-                'disconnect() and create a new NetStation for the next '
-                'recording.'
+                'A recording is already active. Call end_rec() before '
+                'starting another recording on this connection.'
             )
         with self._io_lock:
             self._command('BeginRecording', strict=True)
             self._recording_started = True
+            self._recording_count += 1
             # Only now is there really a recording to timestamp against.
             self._recording_start = time.time()
             try:
@@ -1420,6 +1536,11 @@ class NetStation(object):
                 'rejected_samples': rejected_samples,
                 'min_samples': self._drift_min_samples,
                 'min_span': self._drift_min_span,
+                'warmup_enabled': self._drift_warmup,
+                'warmup_min_samples': self._drift_warmup_min_samples,
+                'warmup_min_span': self._drift_warmup_min_span,
+                'warmup_interval': self._drift_warmup_interval,
+                'stable_engaged': self._drift_stable_engaged,
                 'max_delay': self._drift_max_delay,
                 'max_residual': self._drift_max_residual,
                 'window': self._drift_window,
@@ -1440,6 +1561,9 @@ class NetStation(object):
                 'active_anchor_offset': (
                     None if active is None else active.get('anchor_offset')
                 ),
+                'active_stage': (
+                    None if active is None else active.get('stage', 'stable')
+                ),
                 # Present in both cases so consumers never have to test
                 # for the key, only for the value.
                 'model_samples': 0,
@@ -1449,6 +1573,7 @@ class NetStation(object):
                 'model_rms_residual': None,
                 'slope': None,
                 'intercept': None,
+                'model_stage': None,
             }
             if estimate is not None:
                 report.update({
@@ -1461,6 +1586,7 @@ class NetStation(object):
                     'model_rms_residual': estimate['rms_residual'],
                     'slope': estimate['slope'],
                     'intercept': estimate['intercept'],
+                    'model_stage': estimate.get('stage', 'stable'),
                 })
             return report
 
@@ -1509,6 +1635,51 @@ class NetStation(object):
             return {
                 'min_samples': self._drift_min_samples,
                 'min_span': self._drift_min_span,
+            }
+
+    @check_connected
+    def set_drift_warmup(
+        self,
+        enabled: bool = None,
+        min_samples: int = None,
+        min_span: float = None,
+        interval: float = None,
+    ) -> dict:
+        """Configure the optional provisional drift model.
+
+        The provisional model uses a shorter evidence window and a faster
+        automatic sampling interval. It is allowed to drive correction only
+        until the ordinary model meets ``set_drift_requirements()`` and is
+        accepted; the ordinary model then remains the only model fitted for
+        the rest of this connection. Supplying any tuning argument while
+        omitting ``enabled`` implies ``enabled=True``.
+        """
+        if min_samples is not None and min_samples < 2:
+            raise ValueError('min_samples must be at least 2')
+        if min_span is not None and min_span < 0:
+            raise ValueError('min_span must be non-negative')
+        if interval is not None and interval <= 0:
+            raise ValueError('interval must be positive')
+        with self._clock_lock:
+            if enabled is None and any(
+                value is not None for value in
+                (min_samples, min_span, interval)
+            ):
+                enabled = True
+            if enabled is not None:
+                self._drift_warmup = bool(enabled)
+            if min_samples is not None:
+                self._drift_warmup_min_samples = min_samples
+            if min_span is not None:
+                self._drift_warmup_min_span = min_span
+            if interval is not None:
+                self._drift_warmup_interval = interval
+            self._drift_model_dirty = True
+            return {
+                'enabled': self._drift_warmup,
+                'min_samples': self._drift_warmup_min_samples,
+                'min_span': self._drift_warmup_min_span,
+                'interval': self._drift_warmup_interval,
             }
 
     @check_connected
@@ -1682,9 +1853,16 @@ class NetStation(object):
             return {
                 'enabled': self._auto_drift_enabled,
                 'interval': self._auto_drift_interval,
+                'effective_interval': self._effective_drift_interval(),
                 'min_pause': self._auto_drift_min_pause,
                 'background': self._auto_drift_background,
             }
+
+    def _effective_drift_interval(self) -> float:
+        """Return the sampling interval for the model's current stage."""
+        if self._drift_warmup and not self._drift_stable_engaged:
+            return self._drift_warmup_interval
+        return self._auto_drift_interval
 
     def _warn_if_undersampled(self) -> None:
         """Warn when auto-drift was enabled but nothing ever sampled.
@@ -1776,11 +1954,14 @@ class NetStation(object):
             self._auto_drift_thread = None
 
     def _auto_drift_loop(self, stop: threading.Event) -> None:
-        while not stop.wait(self._auto_drift_interval):
+        while True:
             with self._clock_lock:
+                interval = self._effective_drift_interval()
                 active = (
                     self._auto_drift_enabled and self._auto_drift_background
                 )
+            if stop.wait(interval):
+                return
             if not active:
                 continue
             if not self._connected:
@@ -1844,6 +2025,61 @@ class NetStation(object):
                 'slew': self._drift_slew,
                 'max_model_age': self._drift_max_model_age,
                 'stall_after': self._drift_stall_after,
+            }
+
+    @check_connected
+    def set_drift_monitoring(
+        self,
+        excursion_threshold: float = None,
+        sample_reject_offset: float = None,
+        status_interval: float = None,
+    ) -> dict:
+        """Tune the post-engagement monitoring of the drift correction.
+
+        These do not change what the corrector applies; they change what it
+        notices and logs once a model is engaged.
+
+        Parameters
+        ----------
+        excursion_threshold:
+            Seconds of disagreement between a measured offset and the active
+            model's prediction that opens a ``drift_level_excursion`` record
+            (closed by ``drift_level_recovered`` when it settles back). Use
+            0 to disable the excursion watch.
+        sample_reject_offset:
+            Seconds beyond which a single sample is treated as a glitch and
+            marked invalid before it can enter a fit, leaving a
+            ``drift_sample_rejected`` record. Use 0 to disable the bound and
+            let every low-delay sample into the window.
+        status_interval:
+            Minimum seconds between ``drift_model_status`` heartbeat records
+            while a model is engaged. Use 0 to disable the heartbeat.
+        """
+        with self._clock_lock:
+            if excursion_threshold is not None:
+                if excursion_threshold < 0:
+                    raise ValueError(
+                        'excursion_threshold must be non-negative')
+                self._drift_excursion_threshold = (
+                    None if excursion_threshold == 0 else excursion_threshold
+                )
+            if sample_reject_offset is not None:
+                if sample_reject_offset < 0:
+                    raise ValueError(
+                        'sample_reject_offset must be non-negative')
+                self._drift_sample_reject_offset = (
+                    None if sample_reject_offset == 0 else sample_reject_offset
+                )
+            if status_interval is not None:
+                if status_interval < 0:
+                    raise ValueError('status_interval must be non-negative')
+                self._drift_status_interval = (
+                    None if status_interval == 0 else status_interval
+                )
+            return {
+                'excursion_threshold': self._drift_excursion_threshold,
+                'sample_reject_offset': self._drift_sample_reject_offset,
+                'status_interval': self._drift_status_interval,
             }
 
     @check_connected
@@ -1973,7 +2209,7 @@ class NetStation(object):
         with self._clock_lock:
             expected = self._auto_drift_enabled and self._auto_drift_background
             last_success = self._ntp_last_success_monotonic
-            interval = self._auto_drift_interval
+            interval = self._effective_drift_interval()
             max_age = self._drift_max_model_age
             failures = self._ntp_failure_count
             consecutive = self._ntp_consecutive_failures
@@ -2085,7 +2321,8 @@ class NetStation(object):
             now = time.monotonic()
             last = self._auto_drift_last_monotonic
             if last is not None:
-                due_in = self._auto_drift_interval - (now - last)
+                interval = self._effective_drift_interval()
+                due_in = interval - (now - last)
                 if due_in > 0:
                     return {
                         'sampled': False,
@@ -2204,7 +2441,7 @@ class NetStation(object):
             stalled = self._drift_stalled
             reject_reason = self._drift_last_reject_reason
             model = self._drift_model
-            interval = self._auto_drift_interval
+            interval = self._effective_drift_interval()
             min_samples = self._drift_min_samples
             min_span = self._drift_min_span
             slew = self._drift_slew
@@ -2377,6 +2614,8 @@ class NetStation(object):
             'drift_accepted_fits': state.get('drift_accepted_fits'),
             'drift_rejected_fits': state.get('drift_rejected_fits'),
             'drift_samples': state.get('drift_samples'),
+            'active_drift_model_stage': state.get('active_drift_model_stage'),
+            'drift_stable_engaged': state.get('drift_stable_engaged'),
             'active_drift_slope_ms_per_hour': (
                 slope_ms_per_hour(slope)
             ),
@@ -2429,6 +2668,10 @@ class NetStation(object):
                 'drift_correction': self._drift_correction,
                 'drift_min_samples': self._drift_min_samples,
                 'drift_min_span': self._drift_min_span,
+                'drift_warmup': self._drift_warmup,
+                'drift_warmup_min_samples': self._drift_warmup_min_samples,
+                'drift_warmup_min_span': self._drift_warmup_min_span,
+                'drift_warmup_interval': self._drift_warmup_interval,
                 'drift_max_delay': self._drift_max_delay,
                 'drift_max_residual': self._drift_max_residual,
                 'drift_window_minutes': (
@@ -2491,6 +2734,10 @@ class NetStation(object):
                 'drift_samples': len(self._drift_history),
                 'drift_min_samples': self._drift_min_samples,
                 'drift_min_span': self._drift_min_span,
+                'drift_warmup': self._drift_warmup,
+                'drift_warmup_min_samples': self._drift_warmup_min_samples,
+                'drift_warmup_min_span': self._drift_warmup_min_span,
+                'drift_warmup_interval': self._drift_warmup_interval,
                 'drift_max_delay': self._drift_max_delay,
                 'drift_max_residual': self._drift_max_residual,
                 'drift_window': self._drift_window,
@@ -2498,6 +2745,9 @@ class NetStation(object):
                 'drift_rejected_samples': drift.get('rejected_samples'),
                 'drift_model_samples': drift.get('model_samples'),
                 'drift_model_span': drift.get('model_span'),
+                'drift_model_stage': drift.get('model_stage'),
+                'active_drift_model_stage': drift.get('active_stage'),
+                'drift_stable_engaged': self._drift_stable_engaged,
                 'drift_model_max_residual': drift.get('model_max_residual'),
                 'drift_model_rms_residual': drift.get('model_rms_residual'),
                 'drift_slope': drift.get('slope'),
@@ -2571,6 +2821,33 @@ class NetStation(object):
         sample['burst_worst_delay'] = max(delays) if delays else None
         sample['valid'] = response.delay <= self._drift_max_delay
         sample['reject_reason'] = None if sample['valid'] else 'high_delay'
+        # Hard outlier gate. A sample that survives the delay check can
+        # still be a multi-second glitch; let it into the window and the
+        # slope is ruined. Compare against where the engaged model's slope
+        # says this sample should sit relative to the last real sample --
+        # the *raw* slope, not _predict_active_ntp_offset(), whose max-age
+        # clamp and level retirement would flag an honestly drifted offset
+        # after a long sampling gap as an outlier. There is nothing to
+        # compare against before the first fit, and the delay check already
+        # covers that startup window.
+        outlier_error = None
+        active = self._drift_active_model
+        if (
+            sample['valid']
+            and elapsed is not None
+            and self._drift_sample_reject_offset is not None
+            and active is not None
+        ):
+            previous = self._last_valid_drift_sample()
+            if previous is not None:
+                expected = (
+                    previous['offset_mono']
+                    + active['slope'] * (elapsed - previous['elapsed'])
+                )
+                outlier_error = sample['offset_mono'] - expected
+                if abs(outlier_error) > self._drift_sample_reject_offset:
+                    sample['valid'] = False
+                    sample['reject_reason'] = 'level_outlier'
         self._drift_history.append(sample)
         self._drift_model_dirty = True
         if self._debug:
@@ -2595,7 +2872,133 @@ class NetStation(object):
         # what makes the whole prep window count as one refit.
         if elapsed is not None:
             self._ntp_drift_regression()
+        # After the refit: a rejected outlier leaves a trace, and the
+        # engaged model is checked for a level excursion and given the
+        # chance to emit a heartbeat. All three only queue records (the
+        # caller flushes outside the lock), and all read drift state
+        # directly rather than through clock_state(), so none re-enters the
+        # regression path this runs under.
+        if sample['reject_reason'] == 'level_outlier':
+            self._note_sample_outlier(sample, outlier_error)
+        if elapsed is not None:
+            self._note_level_excursion(sample)
+            self._maybe_emit_drift_status(sample)
         return dict(sample)
+
+    def _note_sample_outlier(self, sample: dict, error: float) -> None:
+        """Record a sample dropped by the hard outlier gate."""
+        context = self._drift_transition_context()
+        context.update(
+            record='drift_sample_rejected',
+            reject_reason='level_outlier',
+            sample_offset_mono=sample.get('offset_mono'),
+            sample_delay=sample.get('delay'),
+            level_error=error,
+            level_error_ms=None if error is None else error * 1000.0,
+            reject_offset_ms=self._drift_sample_reject_offset * 1000.0,
+            clock=None,
+        )
+        self._queue_log_record(context)
+
+    def _note_level_excursion(self, sample: dict) -> None:
+        """Log when the measured offset leaves, or returns to, the model.
+
+        The fit gates decide whether a *fit* is trustworthy; this watches
+        whether the offsets the engaged model is being fed still agree with
+        it. A sustained disagreement means the model is right and the world
+        shifted under it (or the reverse), and either way event timestamps
+        are off by the excursion while it lasts. Hysteresis mirrors the
+        sampling-failure detector: one record on entry, one on recovery.
+        """
+        if self._drift_excursion_threshold is None:
+            return
+        active = self._drift_active_model
+        elapsed = sample.get('elapsed')
+        if active is None or elapsed is None or not sample.get('valid'):
+            return
+        predicted = self._predict_active_ntp_offset(elapsed)
+        if predicted is None:
+            return
+        error = sample['offset_mono'] - predicted
+        magnitude = abs(error)
+        if not self._drift_excursion_reported:
+            if magnitude <= self._drift_excursion_threshold:
+                return
+            self._drift_excursion_reported = True
+            self._drift_excursion_started_elapsed = elapsed
+            self._drift_excursion_peak = error
+            context = self._drift_transition_context()
+            context.update(
+                record='drift_level_excursion',
+                level_error=error,
+                level_error_ms=error * 1000.0,
+                excursion_threshold_ms=self._drift_excursion_threshold * 1000.0,
+                clock=None,
+            )
+            self._queue_log_record(context)
+            return
+        # Already in an excursion: track the peak, and close it out once the
+        # offset settles back inside the threshold.
+        if magnitude > abs(self._drift_excursion_peak):
+            self._drift_excursion_peak = error
+        if magnitude > self._drift_excursion_threshold:
+            return
+        started = self._drift_excursion_started_elapsed
+        peak = self._drift_excursion_peak
+        self._drift_excursion_reported = False
+        self._drift_excursion_started_elapsed = None
+        self._drift_excursion_peak = 0.0
+        duration = None if started is None else elapsed - started
+        context = self._drift_transition_context()
+        context.update(
+            record='drift_level_recovered',
+            excursion_duration=duration,
+            peak_level_error=peak,
+            peak_level_error_ms=peak * 1000.0,
+            residual_level_error=error,
+            clock=None,
+        )
+        self._queue_log_record(context)
+
+    def _maybe_emit_drift_status(self, sample: dict) -> None:
+        """Emit a periodic status record while a model is engaged.
+
+        Four log lines for a forty-minute run makes an anomaly invisible in
+        the JSONL. A heartbeat gives every later record -- an excursion, a
+        frame-drop summary -- a nearby baseline of model state to be read
+        against.
+        """
+        if self._drift_status_interval is None:
+            return
+        active = self._drift_active_model
+        elapsed = sample.get('elapsed')
+        if active is None or elapsed is None:
+            return
+        last = self._drift_status_last_elapsed
+        if last is None:
+            # Seed the clock on the first engaged sample without emitting;
+            # the drift_model_engaged record already covers that instant.
+            self._drift_status_last_elapsed = elapsed
+            return
+        if (elapsed - last) < self._drift_status_interval:
+            return
+        self._drift_status_last_elapsed = elapsed
+        context = self._drift_transition_context()
+        outstanding = self._outstanding_level_error(
+            active, context.get('drift_model_age')
+        )
+        context.update(
+            record='drift_model_status',
+            model_stage=active.get('stage'),
+            stable_engaged=self._drift_stable_engaged,
+            outstanding_level_error=outstanding,
+            outstanding_level_error_ms=(
+                None if outstanding is None else outstanding * 1000.0
+            ),
+            excursion_active=self._drift_excursion_reported,
+            clock=None,
+        )
+        self._queue_log_record(context)
 
     def _ntp_drift_regression(self, activation_elapsed: float = None):
         if not self._drift_model_dirty:
@@ -2743,12 +3146,27 @@ class NetStation(object):
 
     def _fit_ntp_drift_regression(self):
         samples = self._valid_drift_samples(windowed=True)
-        if len(samples) < self._drift_min_samples:
-            return self._reject_fit('too_few_samples')
+        span = (
+            0.0 if len(samples) < 2
+            else samples[-1]['elapsed'] - samples[0]['elapsed']
+        )
 
-        span = samples[-1]['elapsed'] - samples[0]['elapsed']
-        if span < self._drift_min_span:
+        stable_ready = (
+            len(samples) >= self._drift_min_samples
+            and span >= self._drift_min_span
+        )
+        if stable_ready:
+            stage = 'stable'
+        elif self._drift_stable_engaged or not self._drift_warmup:
+            if len(samples) < self._drift_min_samples:
+                return self._reject_fit('too_few_samples')
             return self._reject_fit('short_span')
+        else:
+            if len(samples) < self._drift_warmup_min_samples:
+                return self._reject_fit('too_few_samples')
+            if span < self._drift_warmup_min_span:
+                return self._reject_fit('short_span')
+            stage = 'warmup'
 
         xs = [sample['elapsed'] for sample in samples]
         ys = [sample['offset_mono'] for sample in samples]
@@ -2773,6 +3191,7 @@ class NetStation(object):
         ) ** 0.5
         return {
             'fit_id': (
+                stage,
                 len(samples),
                 samples[0]['elapsed'],
                 samples[-1]['elapsed'],
@@ -2781,6 +3200,7 @@ class NetStation(object):
             ),
             'slope': slope,
             'intercept': intercept,
+            'stage': stage,
             'sample_count': len(samples),
             'span': span,
             'max_residual': max_residual,
@@ -2796,6 +3216,13 @@ class NetStation(object):
             sample.get('elapsed') is not None
             and sample.get('valid', True)
         )
+
+    def _last_valid_drift_sample(self) -> dict:
+        """The most recent usable sample, or None. Cheap: walks from newest."""
+        for sample in reversed(self._drift_history):
+            if self._is_usable_sample(sample):
+                return sample
+        return None
 
     def _valid_drift_samples(self, windowed: bool = True) -> list:
         """Samples the model may fit, most recent last.
@@ -2884,6 +3311,11 @@ class NetStation(object):
     def _activate_drift_model(self, estimate: dict, elapsed: float) -> bool:
         model_id = self._drift_model_id(estimate)
         active = self._drift_active_model
+        promoted_to_stable = (
+            active is not None
+            and active.get('stage') == 'warmup'
+            and estimate.get('stage', 'stable') == 'stable'
+        )
         if active is not None and active.get('model_id') == model_id:
             return False
         if elapsed is None:
@@ -2908,6 +3340,7 @@ class NetStation(object):
         self._drift_active_model = {
             'model_id': model_id,
             'slope': estimate['slope'],
+            'stage': estimate.get('stage', 'stable'),
             'anchor_elapsed': elapsed,
             'anchor_offset': anchor_offset,
             'raw_anchor_offset': target_offset,
@@ -2915,7 +3348,25 @@ class NetStation(object):
             'slew': self._drift_slew,
             'activated_local_time': time.time(),
         }
+        if estimate.get('stage', 'stable') == 'stable':
+            self._drift_stable_engaged = True
         self._drift_accepted_fits += 1
+        if promoted_to_stable:
+            context = self._drift_transition_context()
+            logger.info(
+                'NTP drift correction promoted to the stable model: slope '
+                '%.2f ms/hour from %d samples over %.0f s.',
+                slope_ms_per_hour(estimate['slope']),
+                estimate['sample_count'], estimate['span'],
+            )
+            self._queue_log_record(dict(
+                context,
+                record='drift_model_promoted',
+                model_stage='stable',
+                model_samples=estimate['sample_count'],
+                model_span=estimate['span'],
+                clock=None,
+            ))
         if self._debug:
             error_ms = (target_offset - anchor_offset) * 1000.0
             print(

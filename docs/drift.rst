@@ -447,6 +447,20 @@ Settings reference
    * - ``drift_min_span``
      - ``180.0`` s
      - Elapsed time the samples must cover.
+   * - ``drift_warmup``
+     - ``False``
+     - Enable a provisional short-baseline model until the ordinary model is
+       accepted. Once promoted, the ordinary model never downgrades.
+   * - ``drift_warmup_min_samples``
+     - ``5``
+     - Valid NTP samples required by the provisional model.
+   * - ``drift_warmup_min_span``
+     - ``20.0`` s
+     - Elapsed time the provisional samples must cover.
+   * - ``drift_warmup_interval``
+     - ``5.0`` s
+     - Automatic sampling interval until the ordinary model engages;
+       afterwards ``auto_drift_interval`` applies.
    * - ``drift_max_delay``
      - ``0.010`` s
      - Reject samples with a higher round-trip delay.

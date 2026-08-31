@@ -155,6 +155,12 @@ def make_bare_station(tmp_path):
     ns.set_drift_requirements(min_samples=5, min_span=60.0)
     ns.set_drift_model_options(max_residual=0.003, window_minutes=5)
     ns.set_drift_stability(stall_after=3)
+    # These tests assert the exact sequence of engage/stall/recover records.
+    # The post-engagement monitors (heartbeat, level excursion) are exercised
+    # in test_drift_model.py; silence them here so they do not interleave.
+    ns.set_drift_monitoring(
+        excursion_threshold=0, sample_reject_offset=0, status_interval=0,
+    )
     return ns, log
 
 

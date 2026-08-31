@@ -345,26 +345,27 @@ def test_a_broken_write_closes_the_socket():
     assert sock._socket is None
 
 
-# --- #2: one recording epoch per connection ------------------------------
+# --- #2: multiple recording epochs per connection -------------------------
 
-def test_second_begin_rec_is_refused(monkeypatch):
-    """A second epoch would re-base the clock under the existing model.
-
-    begin_rec() re-runs the ECI clock sync, which moves the local event
-    epoch. The drift model still holds samples whose elapsed times were
-    measured from the previous origin, so a fit would span two coordinate
-    systems.
-    """
+def test_second_begin_rec_reuses_connection_and_drift_history(monkeypatch):
+    """A new recording gets a new epoch without discarding model evidence."""
     ns, _ = make_connected(monkeypatch)
     ns.begin_rec()
+    first_sync = ns._sync_monotonic
+    first_count = len(ns.drift_history())
     ns.end_rec()
 
-    with pytest.raises(NetStationLifecycleError, match='already recorded'):
-        ns.begin_rec()
+    ns.begin_rec()
+
+    assert ns._recording_count == 2
+    assert ns.rec_start() is not None
+    assert ns._sync_monotonic >= first_sync
+    assert len(ns.drift_history()) == first_count + 1
+    assert all(sample['elapsed'] is not None for sample in ns.drift_history())
 
 
-def test_second_begin_rec_is_refused_before_sending_anything(monkeypatch):
-    """The guard must come before BeginRecording reaches the amplifier."""
+def test_begin_rec_while_recording_is_refused_before_sending(monkeypatch):
+    """An active recording must be ended before another can start."""
     ns, _ = make_connected(monkeypatch)
     ns.begin_rec()
     sent = []
@@ -373,7 +374,7 @@ def test_second_begin_rec_is_refused_before_sending_anything(monkeypatch):
         lambda *a, **k: sent.append(a[0]) or True,
     )
 
-    with pytest.raises(NetStationLifecycleError):
+    with pytest.raises(NetStationLifecycleError, match='already active'):
         ns.begin_rec()
     assert sent == []
 

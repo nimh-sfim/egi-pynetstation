@@ -94,10 +94,11 @@ reading you captured earlier:
    ``NetStationLifecycleError``. Pass ``force=True`` only for
    diagnostics, where re-basing the epoch is the thing being measured.
 
-   For the same reason, one ``NetStation`` object records once. A second
-   ``begin_rec()`` is refused: it would re-run the sync while the drift
-   model still holds samples measured from the previous origin. Call
-   ``disconnect()`` and build a new object for the next recording.
+   After ``end_rec()``, the same ``NetStation`` connection may start another
+   recording with ``begin_rec()``. The package translates retained drift
+   samples to the new elapsed-time origin and re-anchors correction to the
+   new sync observation, so the long-baseline evidence survives without
+   mixing coordinate systems.
 
    Correcting for drift is what
    :meth:`~egi_pynetstation.NetStation.NetStation.sample_drift` is for.

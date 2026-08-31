@@ -3,6 +3,34 @@
 All notable changes to `egi-pynetstation` are recorded here. This project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Optional staged drift correction: a provisional short-baseline model can
+  sample faster and correct startup drift until the ordinary long-baseline
+  model is accepted, at which point the stable model permanently takes over.
+- Multiple recordings may now share one connection. Each `begin_rec()`
+  performs its own NTP sync while retained drift samples are translated into
+  the new elapsed-time origin and correction is re-anchored continuously.
+- The PsychoPy photocell example can log every frame interval with long-frame
+  and estimated missed-refresh flags via `--frame-interval-log`. Each frame
+  row now also carries `psychopy_time_s` and `package_time_s`, the frame's
+  absolute time on the same clocks the offset log and drift JSON-lines log
+  use, so frame drops can be joined directly against drift records.
+- Post-engagement drift monitoring, tunable via `set_drift_monitoring()` (and
+  the example's `--drift-excursion-threshold`, `--drift-sample-reject-offset`,
+  and `--drift-status-interval`): a `drift_level_excursion`/
+  `drift_level_recovered` pair when a measured offset leaves and returns to
+  the engaged model, a `drift_sample_rejected` record for a multi-second
+  sample dropped before it can corrupt a fit, and a periodic
+  `drift_model_status` heartbeat so a quiet log still carries model state.
+
+### Fixed
+
+- The photocell CSV schema now retains session identifiers and staged-model
+  fields instead of silently dropping them as extra dictionary keys.
+
 ## [2.1.0] — 2026-08-28
 
 Event timing on Windows was quantized to the system timer tick, and drift

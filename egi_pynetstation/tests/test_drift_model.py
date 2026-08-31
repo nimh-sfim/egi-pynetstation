@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import importlib
+import json
 
 import pytest
 
@@ -395,6 +396,79 @@ def test_presync_samples_do_not_accumulate_rejected_fits():
     assert ns._drift_last_reject_reason is None
 
 
+def test_warmup_model_engages_then_stable_model_takes_over():
+    ns = make_station()
+    ns.set_drift_requirements(min_samples=7, min_span=60.0)
+    ns.set_drift_warmup(
+        enabled=True, min_samples=3, min_span=10.0, interval=2.0,
+    )
+    ns.set_drift_model_options(window_minutes=0)
+
+    for elapsed in (0.0, 5.0, 10.0):
+        add_drift_sample(ns, elapsed, elapsed * 0.0001)
+
+    warmup = ns.drift_estimate()
+    assert warmup['model_stage'] == 'warmup'
+    assert warmup['active_stage'] == 'warmup'
+    assert warmup['stable_engaged'] is False
+    assert ns._effective_drift_interval() == 2.0
+
+    for elapsed in (20.0, 30.0, 45.0, 60.0):
+        add_drift_sample(ns, elapsed, elapsed * 0.0001)
+
+    stable = ns.drift_estimate()
+    assert stable['model_stage'] == 'stable'
+    assert stable['active_stage'] == 'stable'
+    assert stable['stable_engaged'] is True
+    assert ns._effective_drift_interval() == ns._auto_drift_interval
+
+
+def test_setting_a_warmup_option_enables_staged_fitting():
+    ns = make_station()
+    result = ns.set_drift_warmup(min_span=12.0)
+
+    assert result['enabled'] is True
+    assert result['min_span'] == 12.0
+
+
+def test_stable_model_never_downgrades_to_warmup():
+    ns = make_station()
+    ns.set_drift_requirements(min_samples=4, min_span=30.0)
+    ns.set_drift_warmup(enabled=True, min_samples=2, min_span=5.0)
+    ns.set_drift_model_options(window_minutes=0)
+    for elapsed in (0.0, 10.0, 20.0, 30.0):
+        add_drift_sample(ns, elapsed, elapsed * 0.0001)
+    assert ns.drift_estimate()['active_stage'] == 'stable'
+
+    # Changing the stable gates makes the retained evidence insufficient.
+    # The last stable model must remain active; the warmup gate is no longer
+    # eligible once stable correction has engaged.
+    ns.set_drift_requirements(min_samples=20, min_span=300.0)
+    report = ns.refresh_drift_model()
+    assert report['model_stage'] is None
+    assert report['active_stage'] == 'stable'
+
+
+def test_rebase_translates_history_and_reanchors_without_a_step():
+    ns = make_station()
+    ns.set_drift_requirements(min_samples=2, min_span=10.0)
+    ns.set_drift_model_options(window_minutes=0)
+    add_drift_sample(ns, 0.0, 0.000)
+    add_drift_sample(ns, 10.0, 0.010)
+    assert ns._drift_active_model is not None
+
+    ns._recording_count = 2
+    ns._rebase_drift_epoch(1025.0, 0.025)
+    ns._sync_monotonic = 1025.0
+    ns._offset_mono = 0.025
+
+    assert [sample['elapsed'] for sample in ns.drift_history()] == [
+        -25.0, -15.0,
+    ]
+    assert ns._predict_active_ntp_offset(0.0) == pytest.approx(0.025)
+    assert ns._drift_active_model['anchor_elapsed'] == 0.0
+
+
 # --- readiness -----------------------------------------------------------
 
 def ready_station(pending=0.0, model_age=0.0, slew=0.0002):
@@ -566,3 +640,99 @@ def test_wait_rejects_nonsense_arguments():
         ns.wait_for_drift(timeout=-1.0)
     with pytest.raises(ValueError):
         ns.wait_for_drift(poll=0.0)
+
+
+def _logged_station(tmp_path):
+    """A station whose queued transition records land in a readable log."""
+    ns = make_station()
+    ns._error_log = str(tmp_path / 'drift.jsonl')
+    ns.set_drift_requirements(min_samples=2, min_span=1.0)
+    ns.set_drift_model_options(window_minutes=0)
+    return ns
+
+
+def _records(ns, record=None):
+    ns._flush_pending_log_records()
+    with open(ns._error_log, encoding='utf-8') as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    if record is not None:
+        rows = [row for row in rows if row.get('record') == record]
+    return rows
+
+
+def test_multi_second_spike_is_rejected_before_it_enters_the_fit(tmp_path):
+    ns = _logged_station(tmp_path)
+    # A clean, slowly drifting baseline engages the model.
+    for elapsed, offset in ((0.0, 0.000), (10.0, 0.010), (20.0, 0.020)):
+        add_drift_sample(ns, elapsed, offset)
+    slope_before = ns.drift_estimate()['slope']
+
+    # A three-second glitch three seconds later: the slope says ~0.023,
+    # this reads 3.0. It must not touch the fit.
+    add_drift_sample(ns, 23.0, 3.000)
+
+    assert ns._drift_history[-1]['valid'] is False
+    assert ns._drift_history[-1]['reject_reason'] == 'level_outlier'
+    assert ns.drift_estimate()['slope'] == pytest.approx(slope_before)
+    rejected = _records(ns, 'drift_sample_rejected')
+    assert rejected and rejected[-1]['reject_reason'] == 'level_outlier'
+
+
+def test_honestly_drifted_sample_after_a_long_gap_is_not_an_outlier(tmp_path):
+    ns = _logged_station(tmp_path)
+    for elapsed, offset in ((0.0, 0.000), (10.0, 0.010), (20.0, 0.020)):
+        add_drift_sample(ns, elapsed, offset)
+    # 800 s later the offset has honestly drifted by 0.800 s at the same
+    # 0.001 s/s slope. The max-age clamp must not make this look like a
+    # glitch.
+    add_drift_sample(ns, 820.0, 0.820)
+    assert ns._drift_history[-1]['valid'] is True
+    assert not _records(ns, 'drift_sample_rejected')
+
+
+def test_level_excursion_opens_and_closes_one_record_each(tmp_path):
+    ns = _logged_station(tmp_path)
+    ns.set_drift_stability(slew=0.0)  # retire level error instantly
+    ns.set_drift_monitoring(excursion_threshold=0.005)
+    for elapsed, offset in ((0.0, 0.000), (10.0, 0.010), (20.0, 0.020)):
+        add_drift_sample(ns, elapsed, offset)
+
+    # A sample 0.030 s above where the model predicts: an excursion, but
+    # well under the 0.1 s outlier bound so it is a valid sample.
+    add_drift_sample(ns, 30.0, 0.060)
+    assert ns._drift_history[-1]['valid'] is True
+    assert len(_records(ns, 'drift_level_excursion')) == 1
+    assert not _records(ns, 'drift_level_recovered')
+
+    # Back onto the model's line: the excursion closes exactly once.
+    add_drift_sample(ns, 40.0, 0.040)
+    add_drift_sample(ns, 50.0, 0.050)
+    recovered = _records(ns, 'drift_level_recovered')
+    assert len(recovered) == 1
+    assert recovered[0]['peak_level_error'] == pytest.approx(0.030, abs=5e-3)
+
+
+def test_status_heartbeat_is_emitted_on_its_interval(tmp_path):
+    ns = _logged_station(tmp_path)
+    ns.set_drift_monitoring(status_interval=100.0)
+    add_drift_sample(ns, 0.0, 0.000)
+    add_drift_sample(ns, 10.0, 0.010)  # model engages here
+    # First engaged sample seeds the heartbeat clock; nothing due yet.
+    add_drift_sample(ns, 50.0, 0.050)
+    assert not _records(ns, 'drift_model_status')
+    # Past the interval from the seed.
+    add_drift_sample(ns, 160.0, 0.160)
+    status = _records(ns, 'drift_model_status')
+    assert len(status) == 1
+    assert status[0]['model_stage'] is not None
+    assert 'outstanding_level_error_ms' in status[0]
+
+
+def test_disabling_the_outlier_bound_lets_a_spike_through(tmp_path):
+    ns = _logged_station(tmp_path)
+    ns.set_drift_monitoring(sample_reject_offset=0)
+    for elapsed, offset in ((0.0, 0.000), (10.0, 0.010), (20.0, 0.020)):
+        add_drift_sample(ns, elapsed, offset)
+    add_drift_sample(ns, 23.0, 3.000)
+    assert ns._drift_history[-1]['valid'] is True
+    assert not _records(ns, 'drift_sample_rejected')
