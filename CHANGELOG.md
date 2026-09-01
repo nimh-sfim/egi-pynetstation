@@ -18,6 +18,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row now also carries `psychopy_time_s` and `package_time_s`, the frame's
   absolute time on the same clocks the offset log and drift JSON-lines log
   use, so frame drops can be joined directly against drift records.
+- The PsychoPy photocell example accepts `--session-break` to keep its
+  black window flipping between consecutive Net Station recordings, allowing
+  recording-boundary display settling to be tested without dropping the ECI
+  connection.
 - Post-engagement drift monitoring, tunable via `set_drift_monitoring()` (and
   the example's `--drift-excursion-threshold`, `--drift-sample-reject-offset`,
   and `--drift-status-interval`): a `drift_level_excursion`/

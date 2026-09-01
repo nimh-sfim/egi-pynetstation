@@ -16,6 +16,8 @@ measure the same thing with the sender disabled, for comparison.
 
 ``--sessions N`` repeats the full ``--duration`` test N times as separate
 Net Station recordings while preserving one ECI connection and drift model.
+``--session-break S`` keeps the black PsychoPy window flipping for ``S``
+seconds between stopping one recording and starting the next.
 """
 
 import csv
@@ -532,6 +534,13 @@ def build_parser() -> ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--session-break', type=float, default=0.0,
+        help=(
+            'Keep flipping a black screen for this many seconds between '
+            'end_rec() and the next begin_rec(); default: 0'
+        ),
+    )
+    parser.add_argument(
         '--prep',
         type=float,
         default=0.0,
@@ -757,6 +766,8 @@ def main(argv=None) -> int:
         parser.error('--ntpsync-after-every must be >= 0')
     if args.sessions < 1:
         parser.error('--sessions must be at least 1')
+    if args.session_break < 0:
+        parser.error('--session-break must be non-negative')
     if args.warmup < 0:
         parser.error('--warmup must be non-negative')
     if args.prep < 0:
@@ -938,6 +949,7 @@ def main(argv=None) -> int:
             'dot_frames': dot_frames,
             'sessions': args.sessions,
             'session_duration': args.duration,
+            'session_break': args.session_break,
             'clock': None,
         })
 
@@ -1011,10 +1023,31 @@ def main(argv=None) -> int:
         for trial, isi in enumerate(isis, 1):
             target_session = 1 + (trial - 1) // trials_per_session
             if target_session != current_session:
+                boundary_started = exp_clock.getTime()
                 ns.end_rec()
+                if args.session_break:
+                    print(
+                        f'Flipping black for {args.session_break:g} s '
+                        'between recordings...'
+                    )
+                    deadline = time.monotonic() + args.session_break
+                    while time.monotonic() < deadline:
+                        if should_quit():
+                            raise KeyboardInterrupt
+                        win.flip()
+                        # These flips are outside the stimulus sequence, but
+                        # advancing both counters preserves their difference
+                        # and therefore the first session ISI below.
+                        state['frame'] += 1
+                        onset_frame += 1
                 current_session = target_session
                 session_trial = 0
                 ns.begin_rec()
+                if args.clock_timing:
+                    # Clock scheduling includes the blocking ECI commands
+                    # and the requested break. Move the nominal schedule by
+                    # the same amount so the first ISI is still honored.
+                    next_onset += exp_clock.getTime() - boundary_started
                 print(
                     f'Started session {current_session}/{args.sessions} '
                     'on the existing connection.'

@@ -29,6 +29,16 @@ def test_sessions_option_and_recordings_alias_match():
     assert recordings.sessions == 2
 
 
+def test_session_break_option_defaults_to_zero_and_accepts_seconds():
+    parser = build_parser()
+
+    default = parser.parse_args(['amp'])
+    with_break = parser.parse_args(['amp', '--session-break', '2'])
+
+    assert default.session_break == 0.0
+    assert with_break.session_break == 2.0
+
+
 def test_csv_schema_keeps_session_and_model_stage_fields():
     assert {
         'session', 'session_trial', 'recording', 'recording_trial',
