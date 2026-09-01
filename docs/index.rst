@@ -1,6 +1,14 @@
 EGI PyNetStation
 ================
 
+.. admonition:: Independent community project
+   :class: important
+
+   This is not an EGI or MagStim EGI product. ``egi-pynetstation`` is an
+   independent, community-driven open-source effort that enables Python
+   experiments to synchronize event timing with EGI amplifiers. It is
+   maintained by community contributors, not by EGI or MagStim EGI.
+
 ``egi-pynetstation`` sends precisely timed ECI event markers from Python to
 EGI Net Station / Amp Server Pro.
 
