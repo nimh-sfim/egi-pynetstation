@@ -1,175 +1,139 @@
 Quickstart
 ==========
 
-Every session follows the same shape: construct, connect, record, send
-events, stop.
-
-.. code-block:: python
-
-    from egi_pynetstation import NetStation
-
-    # The computer running Net Station, and the ECI port it listens on.
-    IP_ns = '10.10.10.42'
-    port_ns = 55513
-    # The amplifier, which is also the NTP server.
-    IP_amp = '10.10.10.51'
-
-    ns = NetStation(IP_ns, port_ns)
-    ns.connect(ntp_ip=IP_amp)
-
-    ns.begin_rec()
-
-    ns.send_event(event_type='HIYA')
-
-    # Events may carry a shallow data dictionary.
-    ns.send_event(event_type='STIM', data={'dogs': 'fido'})
-
-    ns.end_rec()
-    ns.disconnect()
-
-The default ``endian='NTEL'`` is correct on both Intel and Apple silicon
-Macs because both are little-endian.  ``NTEL`` is a legacy ECI byte-order
-token, not a requirement that the processor be made by Intel.  See
-:ref:`eci-byte-order` before overriding it.
-
-``begin_rec()`` performs the one ECI ``NTPClockSync`` that establishes the
-event timestamp epoch, so it must come before any events.
-
-Event format rules
-------------------
-
-``event_type`` is the only required argument. ``ns.send_event(event_type='stm+')``
-is a complete, valid event. ``label``, ``desc``, and ``data`` are all
-optional, and you can supply any combination of them when you want the
-marker to carry more than its four-character code.
-
-ECI is strict about field widths, and getting these wrong raises rather
-than silently truncating:
-
-* ``event_type`` must be **exactly four ASCII characters**.
-* Every key in ``data`` must also be **exactly four characters**. This is
-  why the examples use names like ``trl_``, ``key_``, ``rt__``.
-* ``data`` values may be ``bool``, ``int``, ``float``, or ``str``.
-* ``data`` must be flat — no nested dictionaries.
-* ``label`` and ``desc`` are free text, up to 256 characters each.
-
-.. code-block:: python
-
-    ns.send_event(
-        event_type='resp',
-        label='key r',
-        desc='key=r incorrect target=p',
-        data={'trl_': 7, 'key_': 'r', 'corr': False, 'rt__': 0.482},
-    )
-
-Putting the human-readable outcome in ``desc`` is worth doing: it is
-legible in Net Station without decoding anything, while ``data`` carries
-the machine-readable version for analysis.
-
-Timestamps
-----------
-
-``send_event()`` defaults to ``start='now'``, which timestamps the event
-using :meth:`~egi_pynetstation.NetStation.NetStation.getTime` — elapsed
-seconds since the NTP sync, with drift correction applied once the model
-has engaged.
-
-You can also pass an explicit ``start`` as a float, or convert a clock
-reading you captured earlier:
-
-.. code-block:: python
-
-    import time
-
-    captured = time.monotonic()          # e.g. inside a flip callback
-    # ... later, off the critical path ...
-    start = ns.time_at_monotonic(captured)
-    ns.send_event(start=start, event_type='stm+')
-
-.. important::
-
-   **Use exactly one ECI clock sync per recording.**
-   :meth:`~egi_pynetstation.NetStation.NetStation.ntpsync` is called for
-   you by ``begin_rec()``. Calling it again to "keep the clock fresh"
-   resets the local event timestamp epoch and creates a discontinuity in
-   the timestamps sent to Net Station, so a second call now raises
-   ``NetStationLifecycleError``. Pass ``force=True`` only for
-   diagnostics, where re-basing the epoch is the thing being measured.
-
-   For the same reason, one ``NetStation`` object records once. A second
-   ``begin_rec()`` is refused: it would re-run the sync while the drift
-   model still holds samples measured from the previous origin. Call
-   ``disconnect()`` and build a new object for the next recording.
-
-   Correcting for drift is what
-   :meth:`~egi_pynetstation.NetStation.NetStation.sample_drift` is for.
-   It queries NTP only and sends no ECI command. See :doc:`drift`.
-
-Cleaning up
------------
-
-``end_rec()`` and ``disconnect()`` both flush any queued events first, so
-markers sent on the last trial still reach Net Station. A ``finally``
-block is the right home for them:
-
-.. code-block:: python
-
-    recording = False
-    try:
-        ns.begin_rec()
-        recording = True
-        ...
-    finally:
-        if recording:
-            ns.end_rec()
-        ns.disconnect()
-
-.. _checking-the-run:
-
-Check the run before you trust it
+Automatic clock-offset correction
 ---------------------------------
 
-``send_event()`` does not block, and that is what makes it safe to call
-from a flip callback — but it also means **it cannot tell you the send
-failed.** It returns ``None`` immediately, having handed the socket write
-to a worker thread. If that write fails, the marker never reaches Net
-Station and your experiment carries on with no exception and no return
-value to check.
+This package automatically tracks and corrects changes in the clock offset
+between the EGI amplifier and the stimulus computer. You may still manage NTP
+timing manually, but automatic background sampling performed better in our
+tests, so it is enabled by default.
 
-Nothing is hidden; it is just recorded rather than raised. One call
-reports it:
+Background sampling starts when ``connect()`` is called. The conservative,
+stable model requires at least 13 valid samples spanning at least 180 seconds.
+Call ``connect()`` early--for example, while measuring impedances or showing
+participant instructions--so that this time overlaps with participant setup.
+On M-series macOS devices, we found that the drift during these 180 seconds
+was less than 2ms, and thus did not see reason to ensure the model was active
+when the recording began or stimuli were presented. 
+
+However, on some configuations of Windows, we found the early jitter to be
+incompatible with timing needed for robust ERP analysis. If waiting for the 
+stable model is too long, enable the provisional warm-up model:
 
 .. code-block:: python
 
-    summary = ns.session_summary()
-    if not summary['ok']:
-        print(summary)
+   ns.connect(ntp_ip=amp_ip, drift_warmup=True)
 
-Add that before ``disconnect()``, or right after it, and log the result
-alongside your behavioural data. ``ok`` is True only when drift correction
-engaged and is not stalled, NTP sampling is current, and no event or ECI
-response failed. When it is False, the rest of the dictionary says which
-of those it was.
+The provisional model requires at least five valid samples spanning at least
+20 seconds. The stable model continues accumulating evidence in the background
+and automatically takes over after its 180-second gates are met. In our tests,
+the provisional model remained reliable until that takeover.
 
-The same information is available piecewise —
-:meth:`~egi_pynetstation.NetStation.NetStation.event_errors` for failed
-sends, :meth:`~egi_pynetstation.NetStation.NetStation.eci_errors` for
-rejected or garbled ECI responses, and
-:meth:`~egi_pynetstation.NetStation.NetStation.clock_state` for the full
-drift picture. Passing ``error_log=`` to the constructor writes all of it
-to a JSON-lines file as the session runs, which is the version you will
-want when something did go wrong. See :doc:`diagnostics`.
+These durations are minimum evidence windows, not guarantees: rejected or
+delayed NTP samples can extend them. Test the complete experiment with a
+photocell or microswitch to verify the offsets on the specific stimulus
+computer and EGI setup. 
 
-.. tip::
+The normal lifecycle
+--------------------
 
-   If you would rather a bad ECI response stop the run instead of being
-   recorded, pass ``strict_eci=True`` to ``connect()``. That is a good
-   setting for a pilot or a diagnostic session and a risky one for a real
-   participant, where losing one marker beats losing the whole recording.
+.. code-block:: python
 
-Next steps
-----------
+   from egi_pynetstation import NetStation
 
-* :doc:`psychopy` — the integration pattern for visual experiments.
-* :doc:`drift` — what drift correction does and how to feed it.
-* :doc:`examples` — complete runnable scripts.
+   ns = NetStation('10.10.10.42', 55513)
+
+   ns.connect(ntp_ip='10.10.10.51')
+   try:
+       ns.begin_rec()
+       try:
+           ns.send_event(event_type='stim')
+           ns.send_event(
+               event_type='resp',
+               label='space',
+               data={'trl_': 1, 'rt__': 0.482},
+           )
+       finally:
+           ns.end_rec()
+       print(ns.session_summary())
+   finally:
+       ns.disconnect()
+
+Replace the three network values with those configured for your lab.
+
+The five commands
+-----------------
+
+``connect(ntp_ip=...)``
+   Opens ECI. Drift correction and background sampling start automatically.
+
+``begin_rec()``
+   Starts one Net Station recording and performs its NTP clock sync.
+
+``send_event(event_type='stim')``
+   Captures the current timestamp and queues a marker. ``event_type`` must be
+   exactly four ASCII characters.
+
+``end_rec()``
+   Flushes pending markers and ends the current recording.
+
+``disconnect()``
+   Closes ECI and stops background workers.
+
+Event fields
+------------
+
+Only ``event_type`` is required. Common optional fields are:
+
+.. code-block:: python
+
+   ns.send_event(
+       event_type='resp',
+       label='correct',
+       desc='participant pressed space',
+       data={'trl_': 12, 'corr': True, 'rt__': 0.482},
+   )
+
+Every ``data`` key must also be exactly four characters. Values may be
+``bool``, ``int``, ``float``, or ``str``.
+
+Multiple recordings, one connection
+-----------------------------------
+
+End one recording before starting the next:
+
+.. code-block:: python
+
+   ns.connect()
+   ...
+   ns.begin_rec()
+   # session 1
+   ns.end_rec()
+
+   ns.begin_rec()
+   # session 2; the stable drift evidence is retained
+   ns.end_rec()
+   ...
+   ns.disconnect()
+
+Do not call ``ntpsync()`` yourself during a recording. ``begin_rec()`` performs
+the sync each recording needs.
+
+Check the result
+----------------
+
+.. code-block:: python
+
+   summary = ns.session_summary()
+   if not summary['ok']:
+       print(summary)
+
+For a persistent diagnostic log:
+
+.. code-block:: python
+
+   ns = NetStation(ip, port, error_log='run_errors.jsonl')
+
+PsychoPy users should continue with :doc:`psychopy`, then run the
+:doc:`timing_test`. Implementation and tuning details are in :doc:`advanced`.

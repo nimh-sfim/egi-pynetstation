@@ -13,16 +13,23 @@ import warnings
 
 import pytest
 
+from egi_pynetstation import egi_ntp
+
 
 netstation_module = importlib.import_module('egi_pynetstation.NetStation')
 NetStation = netstation_module.NetStation
 
 
 class FakeResponse:
+    """Stands in for NTPStats, including the clock readings it carries."""
+
     def __init__(self):
         self.offset = 0.0
         self.delay = 0.002
         self.tx_time = 0.0
+        self.local_time = time.time()
+        self.monotonic_time = egi_ntp.monotonic_time()
+        self.python_monotonic_time = time.monotonic()
 
 
 def make_station(tmp_path, monkeypatch, reply=b'Z', write_error=None):
@@ -148,6 +155,12 @@ def make_bare_station(tmp_path):
     ns.set_drift_requirements(min_samples=5, min_span=60.0)
     ns.set_drift_model_options(max_residual=0.003, window_minutes=5)
     ns.set_drift_stability(stall_after=3)
+    # These tests assert the exact sequence of engage/stall/recover records.
+    # The post-engagement monitors (heartbeat, level excursion) are exercised
+    # in test_drift_model.py; silence them here so they do not interleave.
+    ns.set_drift_monitoring(
+        excursion_threshold=0, sample_reject_offset=0, status_interval=0,
+    )
     return ns, log
 
 
@@ -190,6 +203,8 @@ def test_drift_model_engage_stall_and_recover_are_logged(tmp_path):
 
     engaged, stalled, recovered = records
     assert engaged['elapsed'] == pytest.approx(60.0)
+    assert engaged['drift_accepted_fits'] == 1
+    assert engaged['active_slope'] is not None
     # The stall is reported once, shortly after the step, not on every fit.
     assert stalled['drift_consecutive_rejections'] == 3
     assert stalled['drift_last_reject_reason'] == 'high_residual'
@@ -495,7 +510,7 @@ def test_send_event_raises_on_bad_start_instead_of_returning(
 def test_gettime_never_refits_or_writes_to_disk(tmp_path, monkeypatch):
     """getTime() must be a pure reader: no refit, no I/O, ever.
 
-    time_at_monotonic() holds _clock_lock. It used to reach
+    time_at_capture() holds _clock_lock. It used to reach
     _ntp_drift_regression() with a dirty model, which ran a full O(window)
     regression and, on a model transition, an _append_error_log() that does
     mkdir + open + write -- all inside the lock, on whatever thread called
@@ -606,8 +621,8 @@ def test_join_timeout_covers_a_full_burst_against_a_dead_server(
 ):
     """The join budget must exceed the worst-case burst duration.
 
-    ntplib defaults to a 5 s per-query timeout; with the default 4-query
-    burst that is ~20 s, against a join that used to be a flat 5 s. The
+    The NTP client defaults to a 5 s per-query timeout; with the default
+    4-query burst that is ~20 s, against a join that used to be a flat 5 s. The
     thread was then abandoned still running, and a later start could add
     a second sampler alongside it.
     """

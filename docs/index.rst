@@ -1,66 +1,65 @@
-Welcome to egi-pynetstation's documentation!
-============================================
+EGI PyNetStation
+================
 
-``egi-pynetstation`` is a Python interface for sending ECI commands and
-event markers to EGI Net Station / Amp Server Pro, designed for
-high-resolution event marking from a small API.
+.. admonition:: Independent community project
+   :class: important
 
-A single ECI ``NTPClockSync`` establishes the event timestamp epoch, and
-client-side drift correction then compensates for the slow clock drift
-between the stimulus computer and the amplifier's NTP server.
+   This is not an EGI or MagStim EGI product. ``egi-pynetstation`` is an
+   independent, community-driven open-source effort that enables Python
+   experiments to synchronize event timing with EGI amplifiers. It is
+   maintained by community contributors, not by EGI or MagStim EGI.
 
-Validated over one-hour continuous recordings against a photocell: the
-marker-to-photocell offset held to a standard deviation of **0.94 ms**
-with a residual trend of **+0.49 ms/hour**, across a run in which the
-operating system stepped the system clock by 256 ms.
+``egi-pynetstation`` sends precisely timed ECI event markers from Python to
+EGI Net Station / Amp Server Pro.
+
+Most experiments need five commands:
+
+.. code-block:: python
+
+   from egi_pynetstation import NetStation
+
+   ns = NetStation('10.10.10.42', 55513)
+   ns.connect(ntp_ip='10.10.10.51')
+   ns.begin_rec()
+   ns.send_event(event_type='stim')
+   ns.end_rec()
+   ns.disconnect()
+
+Drift correction and background sampling are automatic. Validate the complete
+setup with the timing test before collecting data.
+
+Basics
+------
+
+Read these pages in order. They cover the normal experiment path without the
+implementation details.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :caption: Basics
 
    installation
    quickstart
    psychopy
-   drift
-   diagnostics
+   timing_test
    examples
+
+Advanced and reference
+----------------------
+
+The advanced guide covers tuning, manual sampling, timestamp internals,
+diagnostics, platform behavior, and validation.
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Advanced and reference
+
+   advanced
    api
    legacy
 
-The short version
------------------
-
-.. code-block:: python
-
-    from egi_pynetstation import NetStation
-
-    ns = NetStation('10.10.10.42', 55513)
-    ns.connect(ntp_ip='10.10.10.51')   # drift sampling starts on its own thread
-    ns.begin_rec()
-
-    # In a visual experiment, mark the flip that shows the stimulus.
-    win.callOnFlip(ns.send_event, event_type='stm+')
-    win.flip()
-
-    ns.end_rec()
-    ns.disconnect()
-
-Three things are worth knowing before you write anything else:
-
-1. **Drift correction is on by default, and so is sampling for it** — a
-   background thread takes NTP samples on its own, so there is nothing to
-   wire up. Advanced use cases can take over sampling manually instead;
-   see :doc:`drift`.
-2. **Send events from the flip callback.**
-   :meth:`~egi_pynetstation.NetStation.NetStation.send_event` never
-   blocks, so it is safe there. See :doc:`psychopy`.
-3. **Do not re-sync the ECI clock during a recording.** One sync included in
-   ``begin_rec()`` is correct; repeated syncs reset the timestamp epoch and
-   are refused unless ``force=True`` is passed for diagnostics.
-
-Indices and tables
-==================
+Indices
+-------
 
 * :ref:`genindex`
 * :ref:`modindex`
-* :ref:`search`

@@ -11,8 +11,13 @@ critical path.
 This script deliberately uses the package's own threading rather than
 managing a worker itself, so that a run validates what real experiments
 will actually do. The key metric is ``send_call_span_ms``: how long
-``send_event()` blocks the flip callback. Run with ``--sync-events`` to
+``send_event()`` blocks the flip callback. Run with ``--sync-events`` to
 measure the same thing with the sender disabled, for comparison.
+
+``--sessions N`` repeats the full ``--duration`` test N times as separate
+Net Station recordings while preserving one ECI connection and drift model.
+``--session-break S`` keeps the black PsychoPy window flipping for ``S``
+seconds between stopping one recording and starting the next.
 """
 
 import csv
@@ -34,11 +39,16 @@ def connect_with_drift_options(ns: NetStation, ntp_ip: str, args) -> None:
             drift_correction=not args.no_drift_correction,
             drift_min_samples=args.drift_min_samples,
             drift_min_span=args.drift_min_span,
+            drift_warmup=True if args.staged_drift else None,
+            drift_warmup_min_samples=args.warmup_model_min_samples,
+            drift_warmup_min_span=args.warmup_model_min_span,
+            drift_warmup_interval=args.warmup_sample_interval,
             drift_max_delay=args.drift_max_delay,
             drift_max_residual=args.drift_max_residual,
             drift_window_minutes=args.drift_window_minutes,
             drift_samples=args.drift_samples,
             drift_sample_spacing=args.drift_sample_spacing,
+            drift_presync=not args.no_drift_presync,
             drift_slew=args.drift_slew,
             drift_max_model_age=args.drift_max_model_age,
             auto_drift=True,
@@ -142,6 +152,14 @@ def build_isi_sequence(duration: float) -> list:
     return isis
 
 
+def build_session_isi_sequence(duration: float, sessions: int) -> tuple:
+    """Return repeated, directly comparable ISIs and trials per session."""
+    if sessions < 1:
+        raise ValueError('sessions must be at least 1')
+    session_isis = build_isi_sequence(duration)
+    return session_isis * sessions, len(session_isis)
+
+
 def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
     """Add flat timing/correction diagnostics to a CSV record.
 
@@ -182,6 +200,9 @@ def add_clock_diagnostics(record: dict, ns: NetStation) -> None:
         ('drift_rejected_samples', 'drift_rejected_samples'),
         ('drift_model_samples', 'drift_model_samples'),
         ('drift_model_span', 'drift_model_span_s'),
+        ('drift_model_stage', 'drift_model_stage'),
+        ('active_drift_model_stage', 'active_drift_model_stage'),
+        ('drift_stable_engaged', 'drift_stable_engaged'),
         ('drift_model_max_residual', 'drift_model_max_residual_ms'),
         ('drift_model_rms_residual', 'drift_model_rms_residual_ms'),
         ('drift_max_residual', 'drift_max_residual_ms'),
@@ -252,8 +273,57 @@ def make_quit_checker():
     return poll_both
 
 
+def warm_up_before_trials(
+    ns: NetStation,
+    win,
+    should_quit,
+    seconds: float,
+    cooperative: bool = False,
+) -> float:
+    """Hold a responsive black screen while the clock model warms up."""
+    if seconds <= 0:
+        return 0.0
+
+    started = ns.capture_time()
+    deadline = started + seconds
+    print(f'Warming up clock model for {seconds:g} s...')
+    while True:
+        if should_quit():
+            raise KeyboardInterrupt
+        remaining = deadline - ns.capture_time()
+        if remaining <= 0:
+            break
+        if cooperative:
+            ns.sample_drift_if_due(available_pause=remaining)
+        # Keep the PsychoPy window responsive and visibly black throughout
+        # the wait. flip() also prevents this loop from busy-spinning.
+        win.flip()
+
+    elapsed = ns.capture_time() - started
+    # A fixed duration, deliberately: comparing runs needs the warm-up to
+    # be the same length every time. An experiment should prefer
+    # ns.wait_for_drift(), which waits for the condition rather than a
+    # guess. Report the readiness verdict either way, so a run says
+    # whether its warm-up actually achieved anything.
+    status = ns.drift_ready()
+    print(
+        f'Warmup complete after {elapsed:.1f} s: '
+        f'{status["samples"]} valid drift samples over '
+        f'{status["span_s"]:.0f} s, '
+        + ('model ready.' if status['ready']
+           else f'model NOT ready ({status["reason"]}, '
+                f'{status["pending_correction_ms"]:.2f} ms pending).')
+    )
+    return elapsed
+
+
 CSV_COLUMNS = [
     'trial',
+    'session',
+    'session_trial',
+    # Compatibility names used by the first multiple-recording prototype.
+    'recording',
+    'recording_trial',
     'phase',
     'send_mode',
     'planned_onset',
@@ -280,6 +350,9 @@ CSV_COLUMNS = [
     'drift_rejected_samples',
     'drift_model_samples',
     'drift_model_span_s',
+    'drift_model_stage',
+    'active_drift_model_stage',
+    'drift_stable_engaged',
     'drift_model_max_residual_ms',
     'drift_model_rms_residual_ms',
     'drift_max_residual_ms',
@@ -323,6 +396,80 @@ def write_records(path: str, records: list) -> None:
         )
         writer.writeheader()
         writer.writerows(records)
+
+
+def write_frame_intervals(
+    path: str,
+    intervals: list,
+    frame_period: float,
+    anchors: dict = None,
+) -> dict:
+    """Write PsychoPy frame intervals and return a compact drop summary.
+
+    ``anchors`` carries the clock readings captured the instant frame
+    recording began: ``psychopy_time`` (the experiment's MonotonicClock,
+    shared with the offset log) and ``package_time`` (the drift-corrected
+    NetStation clock, shared with the drift JSONL). When present, each row
+    also carries the absolute time of that frame on both clocks, so a long
+    frame can be lined up directly against a ``drift_level_excursion`` or
+    ``drift_model_status`` record without eyeballing minute:second.
+    """
+    if not path:
+        return {'frames': 0, 'long_frames': 0, 'estimated_missed_frames': 0}
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    anchors = anchors or {}
+    psychopy_anchor = anchors.get('psychopy_time')
+    package_anchor = anchors.get('package_time')
+    threshold = frame_period * 1.5
+    elapsed = 0.0
+    long_frames = 0
+    missed_total = 0
+    with open(path, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = [
+            'frame_index', 'elapsed_s', 'psychopy_time_s', 'package_time_s',
+            'interval_s', 'interval_ms',
+            'expected_frames', 'estimated_missed_frames', 'long_frame',
+            'nominal_frame_period_ms', 'long_frame_threshold_ms',
+        ]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for index, interval in enumerate(intervals, 1):
+            elapsed += interval
+            expected = max(1, round(interval / frame_period))
+            missed = max(0, expected - 1)
+            long_frame = interval > threshold
+            if long_frame:
+                long_frames += 1
+            missed_total += missed
+            writer.writerow({
+                'frame_index': index,
+                'elapsed_s': elapsed,
+                'psychopy_time_s': (
+                    '' if psychopy_anchor is None
+                    else psychopy_anchor + elapsed
+                ),
+                'package_time_s': (
+                    '' if package_anchor is None
+                    else package_anchor + elapsed
+                ),
+                'interval_s': interval,
+                'interval_ms': interval * 1000.0,
+                'expected_frames': expected,
+                'estimated_missed_frames': missed,
+                'long_frame': long_frame,
+                'nominal_frame_period_ms': frame_period * 1000.0,
+                'long_frame_threshold_ms': threshold * 1000.0,
+            })
+    return {
+        'frames': len(intervals),
+        'long_frames': long_frames,
+        'estimated_missed_frames': missed_total,
+        'max_interval_ms': (
+            max(intervals) * 1000.0 if intervals else None
+        ),
+        'psychopy_anchor_s': psychopy_anchor,
+        'package_anchor_s': package_anchor,
+    }
 
 
 def summarize_send_timing(records: list, send_mode: str) -> None:
@@ -374,23 +521,110 @@ def build_parser() -> ArgumentParser:
     parser.add_argument('--ip-cmd', help='Net Station / command IPv4 address')
     parser.add_argument('--ip-clock', help='NTP server / amplifier IPv4 address')
     parser.add_argument('--port', type=int, help='ECI TCP port')
-    parser.add_argument('--duration', type=float, default=300.0)
+    parser.add_argument(
+        '--duration', type=float, default=300.0,
+        help='Approximate duration of each recording session in seconds',
+    )
+    parser.add_argument(
+        '--sessions', '--recordings', dest='sessions', type=int, default=1,
+        help=(
+            'Run this many consecutive Net Station recordings, each lasting '
+            '--duration seconds, while keeping one ECI connection. '
+            '--recordings is a compatibility alias; default: 1'
+        ),
+    )
+    parser.add_argument(
+        '--session-break', type=float, default=0.0,
+        help=(
+            'Keep flipping a black screen for this many seconds between '
+            'end_rec() and the next begin_rec(); default: 0'
+        ),
+    )
+    parser.add_argument(
+        '--prep',
+        type=float,
+        default=0.0,
+        help=(
+            'Wait this many seconds between connect() and begin_rec(), '
+            'standing in for cap application. Drift samples taken here are '
+            'backfilled at the sync, so the model can be engaged at trial 1; '
+            'default: 0'
+        ),
+    )
+    parser.add_argument(
+        '--no-drift-presync',
+        action='store_true',
+        help='Discard drift samples taken before the clock sync',
+    )
+    parser.add_argument(
+        '--warmup',
+        type=float,
+        default=0.0,
+        help=(
+            'Wait this many seconds after setup and before trial 1, allowing '
+            'the drift model to collect samples; default: 0'
+        ),
+    )
     parser.add_argument('--dot-duration', type=float, default=0.100)
     parser.add_argument('--dot-radius', type=float, default=0.045)
     parser.add_argument('--dot-pos', type=float, nargs=2, default=(0.72, 0.40))
-    parser.add_argument('--sample-interval', type=float, default=15.0)
-    parser.add_argument('--drift-min-samples', type=int, default=13)
-    parser.add_argument('--drift-min-span', type=float, default=180.0)
+    parser.add_argument('--sample-interval', type=float, default=None)
+    parser.add_argument('--drift-min-samples', type=int, default=None)
+    parser.add_argument('--drift-min-span', type=float, default=None)
+    parser.add_argument(
+        '--staged-drift',
+        action='store_true',
+        help=(
+            'Use a provisional short model with faster sampling, then '
+            'permanently promote to the ordinary long-baseline model'
+        ),
+    )
+    parser.add_argument(
+        '--warmup-model-min-samples', type=int, default=None,
+        help='Samples required for the provisional model (default: 5)',
+    )
+    parser.add_argument(
+        '--warmup-model-min-span', type=float, default=None,
+        help='Seconds required for the provisional model (default: 20)',
+    )
+    parser.add_argument(
+        '--warmup-sample-interval', type=float, default=None,
+        help=(
+            'NTP sample interval before the long model engages '
+            '(default: 5 s)'
+        ),
+    )
+    parser.add_argument(
+        '--drift-excursion-threshold', type=float, default=None,
+        help=(
+            'Log a drift_level_excursion when a measured offset sits this '
+            'many seconds from the engaged model; 0 disables (default: 0.005)'
+        ),
+    )
+    parser.add_argument(
+        '--drift-sample-reject-offset', type=float, default=None,
+        help=(
+            'Drop a single drift sample this many seconds beyond the model '
+            'as a glitch before it enters a fit; 0 disables (default: 0.1)'
+        ),
+    )
+    parser.add_argument(
+        '--drift-status-interval', type=float, default=None,
+        help=(
+            'Minimum seconds between drift_model_status heartbeat records; '
+            '0 disables (default: 120)'
+        ),
+    )
     parser.add_argument(
         '--drift-max-delay',
         type=float,
-        default=0.010,
+        default=None,
         help='Reject NTP drift samples above this round-trip delay, in seconds',
     )
     parser.add_argument(
         '--drift-max-residual',
         type=float,
-        default=0.003,
+        default=None,
         help=(
             'Reject NTP drift fits whose maximum absolute residual exceeds '
             'this many seconds'
@@ -399,7 +633,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-window-minutes',
         type=float,
-        default=15.0,
+        default=None,
         help=(
             'Use only the last N minutes of valid drift samples for the model; '
             '0 uses all valid samples'
@@ -408,7 +642,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-samples',
         type=int,
-        default=4,
+        default=None,
         help=(
             'NTP queries per drift sample; the lowest-delay reply is kept. '
             'Higher values reduce offset noise at the cost of a longer pause'
@@ -417,13 +651,13 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-sample-spacing',
         type=float,
-        default=0.05,
+        default=None,
         help='Seconds between NTP queries within one drift sample burst',
     )
     parser.add_argument(
         '--drift-min-pause',
         type=float,
-        default=0.35,
+        default=None,
         help=(
             'Minimum idle time, in seconds, required between stimuli before '
             'an NTP drift burst is taken; shorter gaps are skipped'
@@ -432,7 +666,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-stall-after',
         type=int,
-        default=5,
+        default=None,
         help=(
             'Consecutive rejected drift fits, after the model has engaged, '
             'before a drift_model_stalled record is logged'
@@ -452,7 +686,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-slew',
         type=float,
-        default=0.0002,
+        default=None,
         help=(
             'Maximum rate, in seconds of correction per second elapsed, at '
             'which level errors are retired; 0 applies them instantly'
@@ -461,7 +695,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         '--drift-max-model-age',
         type=float,
-        default=600.0,
+        default=None,
         help=(
             'Stop extrapolating a fitted slope after this many seconds; '
             '0 extrapolates without bound'
@@ -513,6 +747,13 @@ def build_parser() -> ArgumentParser:
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--error-log', help='JSON-lines ECI error log path')
     parser.add_argument('--log', help='CSV file for PsychoPy/ECI event timing')
+    parser.add_argument(
+        '--frame-interval-log',
+        help=(
+            'CSV path for every PsychoPy frame interval, including long-frame '
+            'and estimated-missed-refresh flags'
+        ),
+    )
     return parser
 
 
@@ -523,30 +764,72 @@ def main(argv=None) -> int:
         parser.error('--ntpsync-every must be >= 0')
     if args.ntpsync_after_every < 0:
         parser.error('--ntpsync-after-every must be >= 0')
-    if args.drift_max_delay <= 0:
+    if args.sessions < 1:
+        parser.error('--sessions must be at least 1')
+    if args.session_break < 0:
+        parser.error('--session-break must be non-negative')
+    if args.warmup < 0:
+        parser.error('--warmup must be non-negative')
+    if args.prep < 0:
+        parser.error('--prep must be non-negative')
+    if args.drift_max_delay is not None and args.drift_max_delay <= 0:
         parser.error('--drift-max-delay must be positive')
-    if args.drift_max_residual <= 0:
+    if args.drift_max_residual is not None and args.drift_max_residual <= 0:
         parser.error('--drift-max-residual must be positive')
-    if args.drift_window_minutes < 0:
+    if (
+        args.drift_window_minutes is not None
+        and args.drift_window_minutes < 0
+    ):
         parser.error('--drift-window-minutes must be non-negative')
-    if args.drift_samples < 1:
+    if args.drift_samples is not None and args.drift_samples < 1:
         parser.error('--drift-samples must be at least 1')
-    if args.drift_sample_spacing < 0:
+    if (
+        args.drift_sample_spacing is not None
+        and args.drift_sample_spacing < 0
+    ):
         parser.error('--drift-sample-spacing must be non-negative')
-    if args.drift_slew < 0:
+    if args.drift_slew is not None and args.drift_slew < 0:
         parser.error('--drift-slew must be non-negative')
-    if args.drift_max_model_age < 0:
+    if (
+        args.drift_max_model_age is not None
+        and args.drift_max_model_age < 0
+    ):
         parser.error('--drift-max-model-age must be non-negative')
-    if args.drift_min_pause < 0:
+    if args.drift_min_pause is not None and args.drift_min_pause < 0:
         parser.error('--drift-min-pause must be non-negative')
-    if args.drift_stall_after < 1:
+    if args.drift_stall_after is not None and args.drift_stall_after < 1:
         parser.error('--drift-stall-after must be at least 1')
+    for name in (
+        'drift_excursion_threshold',
+        'drift_sample_reject_offset',
+        'drift_status_interval',
+    ):
+        value = getattr(args, name)
+        if value is not None and value < 0:
+            parser.error(f"--{name.replace('_', '-')} must be non-negative")
+    if (
+        args.warmup_model_min_samples is not None
+        and args.warmup_model_min_samples < 2
+    ):
+        parser.error('--warmup-model-min-samples must be at least 2')
+    if (
+        args.warmup_model_min_span is not None
+        and args.warmup_model_min_span < 0
+    ):
+        parser.error('--warmup-model-min-span must be non-negative')
+    if (
+        args.warmup_sample_interval is not None
+        and args.warmup_sample_interval <= 0
+    ):
+        parser.error('--warmup-sample-interval must be positive')
 
     ip_cmd, ip_clock, port = resolve_network(args)
     send_mode = 'sync' if args.sync_events else 'async'
     records = []
     ns = None
     win = None
+    frame_period = None
+    frame_anchors = None
 
     try:
         from psychopy import core, visual
@@ -558,6 +841,25 @@ def main(argv=None) -> int:
             error_log=args.error_log,
         )
         connect_with_drift_options(ns, ip_clock, args)
+        if args.prep > 0:
+            # Stand in for cap application: the drift sampler runs here,
+            # before the clock sync exists, and those samples are given
+            # their elapsed coordinate when begin_rec() syncs. This is the
+            # only way to exercise drift_presync from this harness, since
+            # connect() and begin_rec() are otherwise back to back.
+            # A plain wait: the PsychoPy window does not exist yet, so
+            # there is nothing to poll for a keypress. Ctrl-C still works.
+            print(f'Simulating {args.prep:g} s of pre-sync prep...')
+            deadline = time.monotonic() + args.prep
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                # Under --drift-cooperative the background sampler is off,
+                # so nothing samples unless this loop asks. Without this
+                # the whole prep window would silently collect nothing.
+                if args.drift_cooperative:
+                    ns.sample_drift_if_due(available_pause=remaining)
+                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            print(f'  {len(ns.drift_history())} pre-sync drift samples.')
         # begin_rec() rather than send_command('BeginRecording'):
         # send_command() is the non-strict diagnostic path, so a refused
         # or garbled response came back as a dictionary nobody inspected
@@ -571,6 +873,17 @@ def main(argv=None) -> int:
         # window and passes the real inter-trial gap to
         # sample_drift_if_due()) if --drift-cooperative was given.
         ns.set_drift_stability(stall_after=args.drift_stall_after)
+        if any(value is not None for value in (
+            args.drift_excursion_threshold,
+            args.drift_sample_reject_offset,
+            args.drift_status_interval,
+        )):
+            monitoring = ns.set_drift_monitoring(
+                excursion_threshold=args.drift_excursion_threshold,
+                sample_reject_offset=args.drift_sample_reject_offset,
+                status_interval=args.drift_status_interval,
+            )
+            print('Drift monitoring:', monitoring)
         print(f'Event send mode: {send_mode}')
         print(
             'Drift sampling: '
@@ -604,7 +917,16 @@ def main(argv=None) -> int:
             edges=64,
         )
         should_quit = make_quit_checker()
-        isis = build_isi_sequence(args.duration)
+        isis, trials_per_session = build_session_isi_sequence(
+            args.duration, args.sessions,
+        )
+        if not trials_per_session:
+            raise SystemExit(
+                '--duration is too short to generate a photocell trial.'
+            )
+        # Duration is per recording session. Repeating the same deterministic
+        # ISI sequence makes the sessions directly comparable while the ECI
+        # connection and accumulated drift evidence remain continuous.
         fps, frame_period, fps_source = measure_display(win, isis)
         timing_mode = 'clock' if args.clock_timing else 'frame'
         print(f'Onset scheduling: {timing_mode}')
@@ -625,18 +947,52 @@ def main(argv=None) -> int:
             'fps_source': fps_source,
             'timing_mode': timing_mode,
             'dot_frames': dot_frames,
+            'sessions': args.sessions,
+            'session_duration': args.duration,
+            'session_break': args.session_break,
             'clock': None,
         })
 
+        warm_up_before_trials(
+            ns,
+            win,
+            should_quit,
+            args.warmup,
+            cooperative=args.drift_cooperative,
+        )
+
         exp_clock = core.MonotonicClock()
+
+        if args.frame_interval_log:
+            # Start with trial 1, after refresh measurement and any requested
+            # warmup, so elapsed_s in this file shares the experiment's zero.
+            win.recordFrameIntervals = False
+            win.frameIntervals = []
+            win.recordFrameIntervals = True
+            # Capture both clocks at the instant recording begins, so every
+            # frame's absolute time can be reconstructed on the same
+            # timebases the offset log and the drift JSONL use.
+            frame_anchors = {
+                'psychopy_time': exp_clock.getTime(),
+                'package_time': ns.getTime(),
+            }
+            print('Frame interval log:', args.frame_interval_log)
         next_onset = 0.0
         onset_frame = 0
         state = {'frame': 0}
         skipped = {'pause_too_short': 0}
+        current_session = 1
+        session_trial = 0
 
         def log_drift_sample(label: str, sample: dict) -> None:
             record = {
                 'trial': '',
+                'session': current_session,
+                'session_trial': '',
+                # Retain explicit recording names in the CSV for consumers
+                # written against the first multiple-recording prototype.
+                'recording': current_session,
+                'recording_trial': '',
                 'phase': label,
                 'send_mode': send_mode,
                 'planned_onset': '',
@@ -665,6 +1021,39 @@ def main(argv=None) -> int:
         log_drift_sample('drift_sample_start', ns.sample_drift())
 
         for trial, isi in enumerate(isis, 1):
+            target_session = 1 + (trial - 1) // trials_per_session
+            if target_session != current_session:
+                boundary_started = exp_clock.getTime()
+                ns.end_rec()
+                if args.session_break:
+                    print(
+                        f'Flipping black for {args.session_break:g} s '
+                        'between recordings...'
+                    )
+                    deadline = time.monotonic() + args.session_break
+                    while time.monotonic() < deadline:
+                        if should_quit():
+                            raise KeyboardInterrupt
+                        win.flip()
+                        # These flips are outside the stimulus sequence, but
+                        # advancing both counters preserves their difference
+                        # and therefore the first session ISI below.
+                        state['frame'] += 1
+                        onset_frame += 1
+                current_session = target_session
+                session_trial = 0
+                ns.begin_rec()
+                if args.clock_timing:
+                    # Clock scheduling includes the blocking ECI commands
+                    # and the requested break. Move the nominal schedule by
+                    # the same amount so the first ISI is still honored.
+                    next_onset += exp_clock.getTime() - boundary_started
+                print(
+                    f'Started session {current_session}/{args.sessions} '
+                    'on the existing connection.'
+                )
+                log_drift_sample('session_start', ns.sample_drift())
+            session_trial += 1
             if args.clock_timing:
                 next_onset += isi
             else:
@@ -703,6 +1092,10 @@ def main(argv=None) -> int:
 
             record = {
                 'trial': trial,
+                'session': current_session,
+                'session_trial': session_trial,
+                'recording': current_session,
+                'recording_trial': session_trial,
                 'phase': 'dot_on',
                 'send_mode': send_mode,
                 'planned_onset': next_onset,
@@ -725,7 +1118,7 @@ def main(argv=None) -> int:
                 # send_event() straight from here -- that is the pattern
                 # this test exists to validate -- and time the call, since
                 # that span is what a real experiment pays at every onset.
-                span_start = time.monotonic()
+                span_start = ns.capture_time()
                 try:
                     result = ns.send_event(
                         event_type='stm+',
@@ -734,10 +1127,10 @@ def main(argv=None) -> int:
                         wait=args.sync_events,
                     )
                 except Exception as err:
-                    span_end = time.monotonic()
+                    span_end = ns.capture_time()
                     rec['send_error'] = f'{type(err).__name__}: {err}'
                 else:
-                    span_end = time.monotonic()
+                    span_end = ns.capture_time()
                     if result is not None:
                         rec['send_result'] = repr(result)
                 rec['flip_monotonic_time'] = span_start
@@ -778,7 +1171,7 @@ def main(argv=None) -> int:
 
             # Everything below here is off the critical path.
             if 'flip_monotonic_time' in record:
-                record['package_time'] = ns.time_at_monotonic(
+                record['package_time'] = ns.time_at_capture(
                     record['flip_monotonic_time']
                 )
             add_clock_diagnostics(record, ns)
@@ -834,6 +1227,10 @@ def main(argv=None) -> int:
             + (f", STALLED ({state['drift_consecutive_rejections']} "
                f"consecutive rejections)" if state['drift_stalled'] else '')
         )
+        print(
+            f"Active drift stage: {state.get('active_drift_model_stage')} "
+            f"(stable engaged: {state.get('drift_stable_engaged')})"
+        )
         if state['drift_accepted_fits'] == 0:
             print(
                 'WARNING: drift correction never engaged. Timestamps used '
@@ -857,10 +1254,34 @@ def main(argv=None) -> int:
         return 130
     finally:
         if win is not None:
+            if args.frame_interval_log and frame_period is not None:
+                try:
+                    win.recordFrameIntervals = False
+                    frame_summary = write_frame_intervals(
+                        args.frame_interval_log,
+                        list(win.frameIntervals),
+                        frame_period,
+                        anchors=frame_anchors,
+                    )
+                    print('Frame interval summary:', frame_summary)
+                    if ns is not None and ns._connected:
+                        ns._append_error_log({
+                            'record': 'frame_interval_summary',
+                            'frame_interval_log': args.frame_interval_log,
+                            **frame_summary,
+                            'clock': None,
+                        })
+                except Exception as err:
+                    print(
+                        'Frame interval logging failed: '
+                        f'{type(err).__name__}: {err}',
+                        file=sys.stderr,
+                    )
             win.close()
         if ns is not None and ns._connected:
             try:
-                ns.end_rec()
+                if ns.rec_start() is not None:
+                    ns.end_rec()
             except Exception as err:
                 print(f'EndRecording failed: {type(err).__name__}: {err}',
                       file=sys.stderr)

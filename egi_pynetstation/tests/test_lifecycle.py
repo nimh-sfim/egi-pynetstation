@@ -24,6 +24,8 @@ import types
 
 import pytest
 
+from egi_pynetstation import egi_ntp
+
 from egi_pynetstation.exceptions import (
     ECIFailure,
     ECINoRecordingDeviceFailure,
@@ -42,12 +44,25 @@ NetStation = netstation_module.NetStation
 
 
 class FakeResponse:
+    """Stands in for NTPStats, including the clock readings it carries.
+
+    The vendored client always attaches local_time/monotonic_time/
+    python_monotonic_time, and NetStation now relies on that rather than
+    falling back to a differently-framed clock read, so the fake has to
+    carry them too.
+    """
+
     offset = 0.0
     delay = 0.002
     tx_time = 0.0
 
+    def __init__(self):
+        self.local_time = time.time()
+        self.monotonic_time = egi_ntp.monotonic_time()
+        self.python_monotonic_time = time.monotonic()
 
-def make_connected(monkeypatch, reply=b'Z', strict_eci=None):
+
+def make_connected(monkeypatch, reply=b'Z', strict_eci=None, **connect_kwargs):
     """A connected station whose amplifier always answers `reply`."""
     monkeypatch.setattr(
         netstation_module, 'NTPClient',
@@ -73,7 +88,9 @@ def make_connected(monkeypatch, reply=b'Z', strict_eci=None):
 
     monkeypatch.setattr(netstation_module, 'Socket', FakeSocket)
     ns = NetStation('10.10.10.42', 55513)
-    ns.connect(ntp_ip='10.10.10.51', strict_eci=strict_eci)
+    ns.connect(
+        ntp_ip='10.10.10.51', strict_eci=strict_eci, **connect_kwargs,
+    )
     return ns, replies
 
 
@@ -328,26 +345,27 @@ def test_a_broken_write_closes_the_socket():
     assert sock._socket is None
 
 
-# --- #2: one recording epoch per connection ------------------------------
+# --- #2: multiple recording epochs per connection -------------------------
 
-def test_second_begin_rec_is_refused(monkeypatch):
-    """A second epoch would re-base the clock under the existing model.
-
-    begin_rec() re-runs the ECI clock sync, which moves the local event
-    epoch. The drift model still holds samples whose elapsed times were
-    measured from the previous origin, so a fit would span two coordinate
-    systems.
-    """
+def test_second_begin_rec_reuses_connection_and_drift_history(monkeypatch):
+    """A new recording gets a new epoch without discarding model evidence."""
     ns, _ = make_connected(monkeypatch)
     ns.begin_rec()
+    first_sync = ns._sync_monotonic
+    first_count = len(ns.drift_history())
     ns.end_rec()
 
-    with pytest.raises(NetStationLifecycleError, match='already recorded'):
-        ns.begin_rec()
+    ns.begin_rec()
+
+    assert ns._recording_count == 2
+    assert ns.rec_start() is not None
+    assert ns._sync_monotonic >= first_sync
+    assert len(ns.drift_history()) == first_count + 1
+    assert all(sample['elapsed'] is not None for sample in ns.drift_history())
 
 
-def test_second_begin_rec_is_refused_before_sending_anything(monkeypatch):
-    """The guard must come before BeginRecording reaches the amplifier."""
+def test_begin_rec_while_recording_is_refused_before_sending(monkeypatch):
+    """An active recording must be ended before another can start."""
     ns, _ = make_connected(monkeypatch)
     ns.begin_rec()
     sent = []
@@ -356,7 +374,7 @@ def test_second_begin_rec_is_refused_before_sending_anything(monkeypatch):
         lambda *a, **k: sent.append(a[0]) or True,
     )
 
-    with pytest.raises(NetStationLifecycleError):
+    with pytest.raises(NetStationLifecycleError, match='already active'):
         ns.begin_rec()
     assert sent == []
 
@@ -830,3 +848,44 @@ def test_drift_settings_covers_every_connect_drift_argument():
     assert accepted - reported == set()
     # The one documented extra: settable only via set_drift_stability().
     assert reported - accepted == {'drift_stall_after'}
+
+
+def test_drift_sampling_is_allowed_before_the_clock_sync(monkeypatch):
+    """Cap application is warm-up time; the sampler used to sit it out.
+
+    sample_drift() raised before ntpsync(), and the background loop
+    skipped every tick, so the twenty-odd minutes between connect() and
+    begin_rec() produced nothing.
+    """
+    ns, _ = make_connected(monkeypatch)
+    try:
+        assert ns._syncepoch is None
+        sample = ns.sample_drift()
+        assert sample['elapsed'] is None
+        assert len(ns._drift_history) == 1
+
+        ns.begin_rec()
+        # The sync backfilled the coordinate the sample was missing.
+        assert ns._drift_history[0]['elapsed'] is not None
+    finally:
+        ns.disconnect()
+
+
+def test_presync_sampling_can_be_turned_off(monkeypatch):
+    ns, _ = make_connected(monkeypatch)
+    try:
+        ns.set_drift_sampling(presync=False)
+        with pytest.raises(RuntimeError, match='before NTP sync'):
+            ns.sample_drift()
+        assert ns._drift_history == []
+        assert ns.sample_drift_if_due()['reason'] == 'not_synced'
+    finally:
+        ns.disconnect()
+
+
+def test_connect_can_disable_presync_sampling(monkeypatch):
+    ns, _ = make_connected(monkeypatch, drift_presync=False)
+    try:
+        assert ns.drift_settings()['drift_presync'] is False
+    finally:
+        ns.disconnect()

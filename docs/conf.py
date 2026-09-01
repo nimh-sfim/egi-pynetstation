@@ -25,7 +25,7 @@ copyright = '2021-2026, Joshua B. Teves and Peter J. Molfese'
 author = 'Joshua B. Teves and Peter J. Molfese'
 
 # The full version, including alpha/beta/rc tags
-release = '2.0.0'
+release = '2.1.0'
 
 
 # -- General configuration ---------------------------------------------------
@@ -51,8 +51,7 @@ autodoc_default_options = {
     'undoc-members': False,
     'show-inheritance': False,
 }
-# ntplib is the only third-party import and is not needed to read docstrings.
-autodoc_mock_imports = ['ntplib']
+autodoc_mock_imports = []
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),

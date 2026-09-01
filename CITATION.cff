@@ -11,7 +11,7 @@ authors:
     given-names: Peter J.
     orcid: https://orcid.org/0000-0002-3045-9408
     affiliation: National Institute of Mental Health, National Institutes of Health
-version: 2.0.0
+version: 2.1.0
 license: MIT
 repository-code: https://github.com/nimh-sfim/egi-pynetstation
 url: https://egi-pynetstation.readthedocs.io/en/latest/

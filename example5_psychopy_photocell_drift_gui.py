@@ -28,10 +28,11 @@ def default_log_paths() -> tuple:
     return (
         str(log_dir / f'psychopy_photocell_{stamp}.csv'),
         str(log_dir / f'psychopy_photocell_errors_{stamp}.jsonl'),
+        str(log_dir / f'psychopy_frame_intervals_{stamp}.csv'),
     )
 
 
-CSV_LOG, ERROR_LOG = default_log_paths()
+CSV_LOG, ERROR_LOG, FRAME_INTERVAL_LOG = default_log_paths()
 
 # (key, label, default, option, kind)
 #   kind 'value'  -> passed as "--option value" when not blank
@@ -46,44 +47,62 @@ FIELDS = [
     ('port', 'ECI port', '', '--port', 'value'),
 
     ('__section__', 'Timing', None, None, 'section'),
-    ('duration_s', 'Duration (s)', 300.0, '--duration', 'value'),
+    # Each session lasts ten minutes, putting the 180 s stable-model promotion
+    # comfortably inside session 1 before the same connection starts session 2.
+    ('duration_s', 'Duration per session (s)', 600.0,
+     '--duration', 'value'),
+    ('sessions', 'Sessions on this connection', 2,
+     '--sessions', 'value'),
+    ('warmup_s', 'Clock warmup before trial 1 (s)', 0.0,
+     '--warmup', 'value'),
     ('dot_duration_s', 'Dot duration (s)', 0.100, '--dot-duration', 'value'),
     ('dot_radius', 'Dot radius', 0.045, '--dot-radius', 'value'),
     ('dot_x', 'Dot X', 0.72, None, 'value'),
     ('dot_y', 'Dot Y', 0.40, None, 'value'),
 
     ('__section__', 'Drift correction', None, None, 'section'),
-    ('sample_interval_s', 'NTP sample interval (s)', 15.0,
+    ('sample_interval_s', 'NTP sample interval (s; blank = package default)', '',
      '--sample-interval', 'value'),
-    ('drift_min_samples', 'Drift min samples', 13,
+    ('drift_min_samples', 'Drift min samples (blank = package default)', '',
      '--drift-min-samples', 'value'),
-    ('drift_min_span_s', 'Drift min span (s)', 180.0,
+    ('drift_min_span_s', 'Drift min span (s; blank = package default)', '',
      '--drift-min-span', 'value'),
-    ('drift_max_delay_s', 'Reject NTP delay above (s)', 0.010,
+    ('staged_drift', 'Short model first, then stable long model', True,
+     '--staged-drift', 'flag'),
+    ('warmup_model_min_samples',
+     'Short-model min samples (blank = default)', '',
+     '--warmup-model-min-samples', 'value'),
+    ('warmup_model_min_span_s',
+     'Short-model min span (s; blank = default)', '',
+     '--warmup-model-min-span', 'value'),
+    ('warmup_sample_interval_s',
+     'Short-model sample interval (s; blank = default)', '',
+     '--warmup-sample-interval', 'value'),
+    ('drift_max_delay_s', 'Reject NTP delay above (s; blank = default)', '',
      '--drift-max-delay', 'value'),
-    ('drift_max_residual_s', 'Reject drift fit residual above (s)', 0.003,
+    ('drift_max_residual_s', 'Reject fit residual above (s; blank = default)', '',
      '--drift-max-residual', 'value'),
-    ('drift_window_min', 'Keep last N minutes (0 = all)', 15.0,
+    ('drift_window_min', 'Keep last N minutes (blank = default; 0 = all)', '',
      '--drift-window-minutes', 'value'),
     ('disable_drift_correction', 'Disable drift correction', False,
      '--no-drift-correction', 'flag'),
 
     ('__section__', 'NTP sampling', None, None, 'section'),
-    ('drift_samples', 'NTP queries per sample', 4,
+    ('drift_samples', 'NTP queries per sample (blank = default)', '',
      '--drift-samples', 'value'),
-    ('drift_sample_spacing_s', 'Seconds between queries in a burst', 0.05,
+    ('drift_sample_spacing_s', 'Seconds between queries (blank = default)', '',
      '--drift-sample-spacing', 'value'),
-    ('drift_min_pause_s', 'Minimum ITI to sample in (s)', 0.35,
+    ('drift_min_pause_s', 'Minimum sampling ITI (s; blank = default)', '',
      '--drift-min-pause', 'value'),
     ('drift_cooperative', 'Advanced: sample only during ITIs, not '
      'background', False, '--drift-cooperative', 'flag'),
 
     ('__section__', 'Drift model stability', None, None, 'section'),
-    ('drift_slew', 'Max level correction rate (s per s)', 0.0002,
+    ('drift_slew', 'Max correction rate (s/s; blank = default)', '',
      '--drift-slew', 'value'),
-    ('drift_max_model_age_s', 'Stop extrapolating after (s, 0 = never)',
-     600.0, '--drift-max-model-age', 'value'),
-    ('drift_stall_after', 'Rejected fits before logging a stall', 5,
+    ('drift_max_model_age_s', 'Max model age (s; blank = default; 0 = never)',
+     '', '--drift-max-model-age', 'value'),
+    ('drift_stall_after', 'Rejected fits before stall (blank = default)', '',
      '--drift-stall-after', 'value'),
 
     ('__section__', 'Diagnostics', None, None, 'section'),
@@ -102,6 +121,8 @@ FIELDS = [
     ('debug_eci', 'Debug ECI traffic', False, '--debug', 'flag'),
     ('csv_log', 'CSV log path', CSV_LOG, '--log', 'value'),
     ('error_log', 'Error log path', ERROR_LOG, '--error-log', 'value'),
+    ('frame_interval_log', 'Frame interval CSV path', FRAME_INTERVAL_LOG,
+     '--frame-interval-log', 'value'),
 ]
 
 MODE_CHOICES = ['amp', 'local', 'custom']
