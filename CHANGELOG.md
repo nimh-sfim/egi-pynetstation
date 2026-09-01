@@ -5,47 +5,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-### Added
-
-- Optional staged drift correction: a provisional short-baseline model can
-  sample faster and correct startup drift until the ordinary long-baseline
-  model is accepted, at which point the stable model permanently takes over.
-- Multiple recordings may now share one connection. Each `begin_rec()`
-  performs its own NTP sync while retained drift samples are translated into
-  the new elapsed-time origin and correction is re-anchored continuously.
-- The PsychoPy photocell example can log every frame interval with long-frame
-  and estimated missed-refresh flags via `--frame-interval-log`. Each frame
-  row now also carries `psychopy_time_s` and `package_time_s`, the frame's
-  absolute time on the same clocks the offset log and drift JSON-lines log
-  use, so frame drops can be joined directly against drift records.
-- The PsychoPy photocell example accepts `--session-break` to keep its
-  black window flipping between consecutive Net Station recordings, allowing
-  recording-boundary display settling to be tested without dropping the ECI
-  connection.
-- Post-engagement drift monitoring, tunable via `set_drift_monitoring()` (and
-  the example's `--drift-excursion-threshold`, `--drift-sample-reject-offset`,
-  and `--drift-status-interval`): a `drift_level_excursion`/
-  `drift_level_recovered` pair when a measured offset leaves and returns to
-  the engaged model, a `drift_sample_rejected` record for a multi-second
-  sample dropped before it can corrupt a fit, and a periodic
-  `drift_model_status` heartbeat so a quiet log still carries model state.
-
-### Changed
-
-- Reorganized the documentation around a short five-command quickstart and a
-  required per-setup Timing Test, with optional drift warmup, tuning, timing
-  internals, diagnostics, and platform details separated from the basic API.
-
-### Fixed
-
-- The photocell CSV schema now retains session identifiers and staged-model
-  fields instead of silently dropping them as extra dictionary keys.
-- Drift-model status heartbeats now keep their schedule when a second
-  recording starts on the same connection. Previously the heartbeat retained
-  the first recording's elapsed-time coordinate and could remain silent for
-  the whole second recording.
-
-## [2.1.0] — 2026-08-28
+## [2.1.0] — 2026-09-01
 
 Event timing on Windows was quantized to the system timer tick, and drift
 correction silently never engaged there. Both are fixed. If you record on
@@ -68,6 +28,12 @@ Windows with Python before 3.13, upgrade.
   not in fact been activated. Fit acceptance and model activation were
   separate steps, and the record was emitted for the former. They are now
   one operation, and the record reports `drift_accepted_fits: 1`.
+- The photocell CSV schema now retains session identifiers and staged-model
+  fields instead of silently dropping them as extra dictionary keys.
+- Drift-model status heartbeats now keep their schedule when a second
+  recording starts on the same connection. Previously the heartbeat retained
+  the first recording's elapsed-time coordinate and could remain silent for
+  the whole second recording.
 
 ### Added
 
@@ -92,6 +58,20 @@ Windows with Python before 3.13, upgrade.
 - NTP replies are validated before they can anchor a recording: mode, leap
   indicator, stratum, and a match between the reply's originate timestamp
   and the request.
+- Optional staged drift correction: a provisional short-baseline model can
+  sample faster and correct startup drift until the ordinary long-baseline
+  model is accepted, at which point the stable model permanently takes over.
+- Multiple recordings may now share one connection. Each `begin_rec()`
+  performs its own NTP sync while retained drift samples are translated into
+  the new elapsed-time origin and correction is re-anchored continuously.
+- The PsychoPy photocell example can log every frame interval with long-frame
+  and estimated missed-refresh flags via `--frame-interval-log`. Each frame
+  row also carries `psychopy_time_s` and `package_time_s`, allowing frame drops
+  to be joined directly against drift records.
+- The PsychoPy photocell example accepts `--session-break` to keep its black
+  window flipping between consecutive Net Station recordings.
+- Post-engagement drift monitoring provides level-excursion and recovery
+  records, rejected-sample records, and periodic model-status heartbeats.
 
 ### Changed
 
@@ -113,6 +93,9 @@ Windows with Python before 3.13, upgrade.
   `egi_pynetstation.egi_ntp`, a fork of ntplib 0.4.0 carrying the clock
   changes above and the reply validation. The public helper API is
   unchanged.
+- Reorganized the documentation around a short five-command quickstart and a
+  required per-setup Timing Test, with tuning, diagnostics, platform details,
+  and timing internals moved to an advanced section.
 
 ### Deprecated
 

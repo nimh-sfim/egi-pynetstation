@@ -39,51 +39,39 @@ That is the complete lifecycle for most experiments:
 4. `end_rec()` flushes queued events and stops the recording.
 5. `disconnect()` closes ECI and its background workers.
 
-## Calculating Drift
-NEW to 2.0+: Drift calculations are now done in the background. The timing
-model becomes most stable 180 seconds after `connect()` is called, but in
-our tests on macOS stimulus computers, no meaningful drift happened before
-that point. Some windows machines may have drift exceeding that, so we
-recommend running both:
-1. Running `example5_psychopy_photocell_drift.py` with default settings
-2. Running `check_clocks.py` to see output similar to the following: 
+## Timing validation
+
+Run a photocell timing test once for every experiment and physical setup:
 
 ```bash
-python   : 3.11.15
-platform : macOS-26.6.2-arm64-arm-64bit
-
-time          impl=clock_gettime(CLOCK_REALTIME)
-			  claimed=1.000e-06 s  measured=7.153e-07 s  monotonic=False
-monotonic     impl=mach_absolute_time()
-			  claimed=4.167e-08 s  measured=4.098e-08 s  monotonic=True
-perf_counter  impl=mach_absolute_time()
-			  claimed=4.167e-08 s  measured=4.098e-08 s  monotonic=True
-
-egi wall      measured=7.153e-07 s
-egi monotonic measured=4.098e-08 s
-
-sleep(0.05)  : mean overshoot 4.59 ms, max 5.07 ms
-egi wall-monotonic skew jitter over 2000 reads: 0.0014 ms
-egi-pynetstation clocks look suitable for drift-corrected ECI timing.
+python example5_psychopy_photocell_drift.py amp --fullscreen \
+  --log timing.csv --error-log timing_errors.jsonl \
+  --frame-interval-log timing_frames.csv
 ```
 
-So long as the final lines are:
-`egi-pynetstation clocks look suitable for drift-corrected ECI timing`
-the drift should be stable. 
+Also verify local clock precision:
 
-### What to do if drift isn't stable
+```bash
+python -m egi_pynetstation.check_clocks
+```
 
-If you find the initial drift on `example5_psychopy_photocell_drift.py` is not
-stable, then we recommend you use a two-step timing model, already baked into the package.
-Simply change your `connect()` line to be:
+The ordinary drift model uses at least 13 samples spanning 180 seconds. If
+the photocell test shows meaningful startup drift, either connect earlier so
+the model can collect evidence before `begin_rec()`, or enable the optional
+provisional model:
+
 ```python
-ns.connect(ntp_ip=amp_ip, drift_warmup=True)
+ns.connect(ntp_ip='10.10.10.51', drift_warmup=True)
 ```
-This will calculate a drift model on the first 20 seconds after `connect()` is called. 
-In our tests, even on intentionally unstable machines, this was enough to adjust for the drift. 
-While the initial model should protect you from early drift, the full 180 second model will automatically
-kick in when it has enough samples. So there's no downside to using the warmup model. 
-As always, verify with a timing test (Example5 and/or your own experiment)!
+
+The provisional model can engage after five samples spanning 20 seconds and
+permanently hands off to the ordinary model when it is ready. Validate the
+choice on the actual stimulus computer, display, network, and amplifier used
+for the experiment.
+
+See the [Timing Test](https://egi-pynetstation.readthedocs.io/en/latest/timing_test.html)
+and [Advanced guide](https://egi-pynetstation.readthedocs.io/en/latest/advanced.html)
+for the full procedure.
 
 ## PsychoPy
 
@@ -100,13 +88,13 @@ worker thread, so it is safe to use in a flip callback.
 
 ## Documentation
 
-- [Installation](docs/installation.rst)
-- [Quickstart](docs/quickstart.rst)
-- [Using PsychoPy](docs/psychopy.rst)
-- [Timing Test](docs/timing_test.rst)
-- [Examples](docs/examples.rst)
-- [Advanced guide](docs/advanced.rst)
-- [API reference](docs/api.rst)
+- [Installation](https://egi-pynetstation.readthedocs.io/en/latest/installation.html)
+- [Quickstart](https://egi-pynetstation.readthedocs.io/en/latest/quickstart.html)
+- [Using PsychoPy](https://egi-pynetstation.readthedocs.io/en/latest/psychopy.html)
+- [Timing Test](https://egi-pynetstation.readthedocs.io/en/latest/timing_test.html)
+- [Examples](https://egi-pynetstation.readthedocs.io/en/latest/examples.html)
+- [Advanced guide](https://egi-pynetstation.readthedocs.io/en/latest/advanced.html)
+- [API reference](https://egi-pynetstation.readthedocs.io/en/latest/api.html)
 
 Run the timing test once for every experiment and physical setup before
 collecting data. At the end of a validation or production run, inspect
