@@ -39,8 +39,51 @@ That is the complete lifecycle for most experiments:
 4. `end_rec()` flushes queued events and stops the recording.
 5. `disconnect()` closes ECI and its background workers.
 
-Event types must be exactly four ASCII characters. Drift correction and
-background NTP sampling are enabled automatically.
+## Calculating Drift
+NEW to 2.0+: Drift calculations are now done in the background. The timing
+model becomes most stable 180 seconds after `connect()` is called, but in
+our tests on macOS stimulus computers, no meaningful drift happened before
+that point. Some windows machines may have drift exceeding that, so we
+recommend running both:
+1. Running `example5_psychopy_photocell_drift.py` with default settings
+2. Running `check_clocks.py` to see output similar to the following: 
+
+```bash
+python   : 3.11.15
+platform : macOS-26.6.2-arm64-arm-64bit
+
+time          impl=clock_gettime(CLOCK_REALTIME)
+			  claimed=1.000e-06 s  measured=7.153e-07 s  monotonic=False
+monotonic     impl=mach_absolute_time()
+			  claimed=4.167e-08 s  measured=4.098e-08 s  monotonic=True
+perf_counter  impl=mach_absolute_time()
+			  claimed=4.167e-08 s  measured=4.098e-08 s  monotonic=True
+
+egi wall      measured=7.153e-07 s
+egi monotonic measured=4.098e-08 s
+
+sleep(0.05)  : mean overshoot 4.59 ms, max 5.07 ms
+egi wall-monotonic skew jitter over 2000 reads: 0.0014 ms
+egi-pynetstation clocks look suitable for drift-corrected ECI timing.
+```
+
+So long as the final lines are:
+`egi-pynetstation clocks look suitable for drift-corrected ECI timing`
+the drift should be stable. 
+
+### What to do if drift isn't stable
+
+If you find the initial drift on `example5_psychopy_photocell_drift.py` is not
+stable, then we recommend you use a two-step timing model, already baked into the package.
+Simply change your `connect()` line to be:
+```python
+ns.connect(ntp_ip=amp_ip, drift_warmup=True)
+```
+This will calculate a drift model on the first 20 seconds after `connect()` is called. 
+In our tests, even on intentionally unstable machines, this was enough to adjust for the drift. 
+While the initial model should protect you from early drift, the full 180 second model will automatically
+kick in when it has enough samples. So there's no downside to using the warmup model. 
+As always, verify with a timing test (Example5 and/or your own experiment)!
 
 ## PsychoPy
 
