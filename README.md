@@ -64,6 +64,17 @@ provisional model:
 ns.connect(ntp_ip='10.10.10.51', drift_warmup=True)
 ```
 
+You can test this with example5:
+
+```python
+python example5_psychopy_photocell_drift.py amp \
+--sessions 1 --duration 3600 \
+--staged-drift --fullscreen \
+--log ex5_log_drift_warmup.csv \
+--error-log ex5_log_drift_warmup_errors.jsonl \
+--frame-interval-log ex5_log_drift_warmup_frames.csv
+```
+
 The provisional model can engage after five samples spanning 20 seconds and
 permanently hands off to the ordinary model when it is ready. Validate the
 choice on the actual stimulus computer, display, network, and amplifier used
