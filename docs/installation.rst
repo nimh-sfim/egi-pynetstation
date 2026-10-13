@@ -1,6 +1,17 @@
 Installation
 ============
 
+.. admonition:: Core library or PsychoPy plugin?
+   :class: note
+
+   ``egi-pynetstation`` is a pure-Python NetStation client. It works in
+   ordinary Python and directly in PsychoPy experiments, without requiring
+   PsychoPy. For the convenience of PsychoPy's plugin framework, Device
+   Manager, and Builder/Studio GUI components, install
+   `psychopy-egi-pynetstation
+   <https://psychopy-egi-pynetstation.readthedocs.io/en/latest/>`_ instead.
+   The PsychoPy plugin installs ``egi-pynetstation`` automatically.
+
 PyPI
 ----
 

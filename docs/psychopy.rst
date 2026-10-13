@@ -1,6 +1,16 @@
 Using PsychoPy
 ==============
 
+.. admonition:: PsychoPy plugin available
+   :class: note
+
+   The examples on this page use the pure-Python ``egi-pynetstation`` API,
+   which works directly with PsychoPy. If you prefer PsychoPy's plugin
+   framework, Device Manager, or Builder/Studio GUI components, install
+   `psychopy-egi-pynetstation
+   <https://psychopy-egi-pynetstation.readthedocs.io/en/latest/>`_. It
+   installs this package automatically.
+
 Mark a visual onset
 -------------------
 
